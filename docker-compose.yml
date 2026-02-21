@@ -1,0 +1,18 @@
+# Docker Compose for PeakIntegrate
+#
+# Usage:
+#   docker compose up    → launches Streamlit GUI at http://localhost:8501
+#
+# Mount your data directory (containing chrom_data.h5, CSVs, experiment.pkl)
+# by editing the volume path below.
+
+services:
+  gui:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # Adjust the left side to your local data path
+      - ./data:/data
+    environment:
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false

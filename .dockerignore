@@ -1,0 +1,28 @@
+# Version control & IDE
+.git
+.gitignore
+.vscode
+.idea
+__pycache__
+*.pyc
+*.pyo
+
+# Data files (mount via volumes instead)
+*.h5
+*.hdf5
+*.pkl
+*.rds
+*.mzML
+data/
+
+# Build artifacts
+*.egg-info
+dist
+build
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation artifacts
+.gemini/
