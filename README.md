@@ -154,4 +154,4 @@ docker compose up
 
 ## License
 
-Internal research tool — University at Buffalo / AEGIS project.
+Internal research tool
