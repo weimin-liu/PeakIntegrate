@@ -1,0 +1,42 @@
+C46-GDGT:
+  mz: 743.7123
+  rt: 34
+cren:
+  mz: 1292.2444
+  rt: 
+brGDGT_IIIa:
+  mz: 1050.0410
+  rt: 42.9
+brGDGT_IIIa_1:
+  mz: 1050.0410
+  rt: 43.7
+brGDGT_IIIa_2:
+  mz: 1050.0410
+  rt: 44.2
+brGDGT_IIIb:
+  mz: 1048.0253
+  rt: 44
+brGDGT_IIIc:
+  mz: 1046.0097
+  rt: 45.3
+brGDGT_IIa:
+  mz: 1036.0253
+  rt: 45.4
+brGDGT_IIa_1:
+  mz: 1036.0253
+  rt: 45.8
+brGDGT_IIb:
+  mz: 1034.0097
+  rt: 46.5
+brGDGT_IIc:
+  mz: 1031.9940
+  rt: 47.8
+brGDGT_Ia:
+  mz: 1022.0097
+  rt: 47.9
+brGDGT_Ib:
+  mz: 1019.9940
+  rt: 49
+brGDGT_Ic:
+  mz: 1017.9784
+  rt: 50.4
