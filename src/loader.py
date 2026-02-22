@@ -23,8 +23,8 @@ from PeakIntegrate.src.models import (
 
 
 def load_experiment(
-    datafolder: str = "/Users/weimin/10-Project/GDGT_peak_integration/tables",
-    hdf5_path: str = "/Users/weimin/chrom_data.h5",
+    datafolder: str = "/Users/weimin/10-Project/GDGT_peak_integration/AEGIS_data/tables",
+    hdf5_path: str = "/Users/weimin/10-Project/GDGT_peak_integration/AEGIS_data/chrom_data.h5",
     sample_regex: str = r"AEGIS-(\d+)",
 ) -> Experiment:
     """Load an :class:`Experiment` from CSV peak-pick tables and an HDF5 file.

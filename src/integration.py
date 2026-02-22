@@ -141,20 +141,40 @@ def integrate_experiment(
             )
             x = rt[mask]
             y = intensity[mask]
-
-            if len(x) < min_points:
-                cmpd_results[sample_name] = np.nan
-                continue
-
             y_s = savgol_filter(y, window_length=savgol_window, polyorder=savgol_poly)
-            max_intensity = y_s.max()
 
-            if max_intensity <= 0:
-                cmpd_results[sample_name] = 0.0
-                continue
+            num_peaks = 0
+            n_iter = 0
+            while (num_peaks == 0) and (len(x) >= min_points):
+                print(len(x))
+                if not n_iter == 0:
+                    x = x[1:]
+                    y_s = y_s[1:]
+                n_iter += 1
+                if len(x) < min_points:
+                    cmpd_results[sample_name] = np.nan
+                    continue
 
-            peaks_indices, _ = find_peaks(y_s, prominence=max_intensity * prominence_frac)
-            num_peaks = len(peaks_indices)
+                max_intensity = y_s.max()
+
+                if max_intensity <= 0:
+                    cmpd_results[sample_name] = 0.0
+                    continue
+
+                peaks_indices, _ = find_peaks(y_s, prominence=max_intensity * prominence_frac)
+                num_peaks = len(peaks_indices)
+
+            if sample_name == 'AEGIS-139' and cmpd == 'brGDGT_IIIa_1':
+                print('yeah')
+            if num_peaks == 0:
+                x = rt[mask]
+                y = intensity[mask]
+                y_s = savgol_filter(y, window_length=savgol_window, polyorder=savgol_poly)
+                peaks_indices = [np.argmin(abs(rtmed-x))]
+                x = x[peaks_indices[0]:]
+                y_s = y_s[peaks_indices[0]:]
+                y = y[peaks_indices[0]:]
+                num_peaks = 1
 
             area_main = np.nan
 
@@ -166,7 +186,7 @@ def integrate_experiment(
                     popt, _ = curve_fit(
                         gauss, x, y_s,
                         p0=[apex_int, apex_rt, 5],
-                        bounds=([0, rtmin, 1], [np.inf, rtmax, 30]),
+                        bounds=([0, apex_rt-2, 1], [np.inf, apex_rt+2, 20]), # add very rigid peak apex boundary, +/- 2s, as the rt correction is very good. #TODO: parameterize the boundary
                         maxfev=10000,
                     )
                     A, mu, sigma = popt
@@ -197,6 +217,7 @@ def integrate_experiment(
                 except Exception:
                     pass
 
+
             cmpd_results[sample_name] = area_main
 
         all_results[cmpd] = cmpd_results
@@ -224,7 +245,7 @@ def main() -> None:
         description="Integrate GDGT peaks from a pickled Experiment.",
     )
     parser.add_argument(
-        "--pkl", default="../../experiment.pkl",
+        "--pkl", default="/Users/weimin/10-Project/GDGT_peak_integration/experiment.pkl",
         help="Path to experiment.pkl (default: ../../experiment.pkl)",
     )
     parser.add_argument(
