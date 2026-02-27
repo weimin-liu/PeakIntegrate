@@ -16,6 +16,7 @@ from typing import Optional
 
 import numpy as np
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
 
 # ════════════════════════════════════════════
@@ -385,42 +386,102 @@ class Experiment:
 
     # ---- Peak Clustering ----
 
+    @staticmethod
+    def find_optimal_clusters(
+        rt_vals: np.ndarray,
+        max_k: int = 6,
+    ) -> int:
+        """Determine the optimal number of clusters using silhouette score.
+
+        Parameters:
+            rt_vals: 1-D array of retention times (will be reshaped if needed).
+            max_k:   Maximum number of clusters to try.
+
+        Returns:
+            Optimal ``k`` (between 2 and ``max_k``).
+        """
+        X = rt_vals.reshape(-1, 1) if rt_vals.ndim == 1 else rt_vals
+        n_samples = len(X)
+
+        if n_samples < 3:
+            return 1
+
+        # Upper bound: can't have more clusters than samples
+        max_k = min(max_k, n_samples - 1)
+        if max_k < 2:
+            return 1
+
+        best_k = 1
+        best_score = 0.45  # minimum silhouette threshold to justify k≥2
+
+        for k in range(2, max_k + 1):
+            km = KMeans(n_clusters=k, random_state=0, n_init="auto")
+            labels = km.fit_predict(X)
+
+            # Silhouette score needs at least 2 distinct labels
+            if len(set(labels)) < 2:
+                continue
+
+            score = silhouette_score(X, labels)
+            print(f"    k={k}: silhouette={score:.3f}")
+            if score > best_score:
+                best_score = score
+                best_k = k
+
+        return best_k
+
     def point_cluster_batch(
         self,
-        compounds: dict[str, int] | list[str],
-        clusters: Optional[list[int]] = None,
+        compounds: dict[str, int | str] | list[str],
+        clusters: Optional[list[int | str]] = None,
     ) -> "Experiment":
         """Run KMeans peak-clustering for multiple compounds.
 
         Parameters:
             compounds: ``{compound: n_clusters}`` dict or a list of names.
+                       Use ``0`` or ``"auto"`` as the cluster count to
+                       automatically determine the best number of clusters.
             clusters:  Required if *compounds* is a list.
 
         Returns:
             ``self`` (modified in place).
         """
         if isinstance(compounds, dict):
-            items = compounds.items()
+            items = list(compounds.items())
         else:
             if clusters is None:
                 raise ValueError("clusters must be provided with list input")
             if len(compounds) != len(clusters):
                 raise ValueError("compounds and clusters length mismatch")
-            items = zip(compounds, clusters)
+            items = list(zip(compounds, clusters))
 
         for cmpd_name, n_cluster in items:
-            print(f"\nClustering {cmpd_name} → {n_cluster} clusters")
+            # Normalise "auto" → 0
+            if isinstance(n_cluster, str) and n_cluster.lower() == "auto":
+                n_cluster = 0
+            n_cluster = int(n_cluster)
+
+            label = "auto" if n_cluster == 0 else str(n_cluster)
+            print(f"\nClustering {cmpd_name} → {label} clusters")
             self.point_cluster(cmpd_name, n_cluster=n_cluster)
 
         print("\nBatch clustering complete")
         return self
 
-    def point_cluster(self, cmpd_name: str, n_cluster: int = 3) -> "Experiment":
+    def point_cluster(
+        self, cmpd_name: str, n_cluster: int = 3, max_k: int = 6,
+    ) -> "Experiment":
         """KMeans clustering of picked peaks by RT.
 
         Peaks are extracted, clustered, renamed with a suffix
         (e.g. ``brGDGT_IIIa_0``), and written back. At most one peak
         per sample per cluster is retained.
+
+        Parameters:
+            cmpd_name: Compound name to cluster.
+            n_cluster: Number of clusters. Use ``0`` for automatic
+                       selection via silhouette score.
+            max_k:     Maximum k to try when ``n_cluster=0``.
         """
         extracted: list[tuple[str, PickedPeak]] = []
 
@@ -443,6 +504,12 @@ class Experiment:
             return self
 
         rt_vals = np.array([peak.rt for _, peak in extracted]).reshape(-1, 1)
+
+        # Auto-detect optimal cluster count
+        if n_cluster <= 0:
+            n_cluster = self.find_optimal_clusters(rt_vals, max_k=max_k)
+            print(f"  Auto-detected optimal k = {n_cluster}")
+
         kmeans = KMeans(n_clusters=n_cluster, random_state=0, n_init="auto")
         kmeans.fit(rt_vals)
 
@@ -471,7 +538,7 @@ class Experiment:
                 eic = chrom.get_eic(cmpd_name)[0]
                 eic.picked.append(peak)
 
-        print(f"  Clustering complete → {cmpd_name}")
+        print(f"  Clustering complete → {cmpd_name} ({n_cluster} clusters)")
         return self
 
     # ---- Diagnostics ----

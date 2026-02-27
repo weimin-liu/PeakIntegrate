@@ -32,6 +32,7 @@ from PeakIntegrate.src.integration import (
     gauss,
     double_gauss,
     TARGET_COMPOUNDS,
+    VALID_MODELS,
 )
 
 # ════════════════════════════════════════════
@@ -49,54 +50,55 @@ st.set_page_config(
 st.markdown("""
 <style>
     .stApp {
-        background: linear-gradient(135deg, #0f0c29 0%, #1a1a2e 50%, #16213e 100%);
+        background: #ffffff;
     }
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #1a1a2e 0%, #0f0c29 100%);
-        border-right: 1px solid rgba(99, 102, 241, 0.3);
+        background: #f8f9fb;
+        border-right: 1px solid #e2e4e9;
     }
     .step-header {
-        background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(168, 85, 247, 0.1));
-        border: 1px solid rgba(99, 102, 241, 0.3);
+        background: linear-gradient(135deg, #eef2ff, #f0ebff);
+        border: 1px solid #c7d2fe;
         border-radius: 12px;
         padding: 1.2rem 1.5rem;
         margin-bottom: 1.2rem;
     }
     .step-header h2 {
         margin: 0;
-        color: #a78bfa;
+        color: #4338ca;
     }
     .step-header p {
         margin: 0.3rem 0 0 0;
-        color: rgba(255,255,255,0.6);
+        color: #64748b;
         font-size: 0.9rem;
     }
     .metric-card {
-        background: rgba(99, 102, 241, 0.08);
-        border: 1px solid rgba(99, 102, 241, 0.2);
+        background: #f1f5f9;
+        border: 1px solid #cbd5e1;
         border-radius: 10px;
         padding: 1rem;
         text-align: center;
     }
     .metric-card h3 {
         margin: 0;
-        color: #818cf8;
+        color: #4338ca;
         font-size: 2rem;
     }
     .metric-card p {
         margin: 0.2rem 0 0 0;
-        color: rgba(255,255,255,0.5);
+        color: #64748b;
         font-size: 0.85rem;
     }
     div[data-testid="stTabs"] button {
         font-weight: 600;
     }
     .success-banner {
-        background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(16, 185, 129, 0.1));
-        border: 1px solid rgba(34, 197, 94, 0.3);
+        background: linear-gradient(135deg, #ecfdf5, #f0fdf4);
+        border: 1px solid #86efac;
         border-radius: 10px;
         padding: 1rem 1.5rem;
         margin: 1rem 0;
+        color: #166534;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -358,13 +360,13 @@ with tab1:
             fig_before.update_layout(
                 title="Before correction",
                 xaxis_title="RT (s)", yaxis_title="Intensity",
-                template="plotly_dark", height=350,
+                template="simple_white", height=350,
                 margin=dict(l=50, r=20, t=40, b=40),
             )
             fig_after.update_layout(
                 title="After correction",
                 xaxis_title="RT (s)", yaxis_title="Intensity",
-                template="plotly_dark", height=350,
+                template="simple_white", height=350,
                 margin=dict(l=50, r=20, t=40, b=40),
             )
 
@@ -444,7 +446,7 @@ with tab2:
         fig_eic.update_layout(
             title=f"EIC: {selected_cmpd}",
             xaxis_title="RT (s)", yaxis_title="Intensity",
-            template="plotly_dark", height=450,
+            template="simple_white", height=450,
             legend=dict(font=dict(size=10)),
             margin=dict(l=50, r=20, t=40, b=40),
         )
@@ -473,7 +475,7 @@ with tab2:
 
         fig_peaks.update_layout(
             xaxis_title="RT (s)", yaxis_title="Integrated Area",
-            template="plotly_dark", height=400,
+            template="simple_white", height=400,
             margin=dict(l=50, r=20, t=20, b=40),
         )
         st.plotly_chart(fig_peaks, use_container_width=True)
@@ -504,17 +506,27 @@ with tab3:
         # Show existing config
         to_remove = []
         for cmpd_name, n_clust in list(config.items()):
-            ccol1, ccol2, ccol3 = st.columns([3, 1, 1])
+            ccol1, ccol2, ccol3, ccol4 = st.columns([3, 1, 1, 1])
             with ccol1:
                 st.text(cmpd_name)
             with ccol2:
-                new_n = st.number_input(
-                    "Clusters",
-                    min_value=2, max_value=10, value=n_clust,
-                    key=f"clust_{cmpd_name}", label_visibility="collapsed",
+                is_auto = st.toggle(
+                    "Auto", value=(n_clust == 0),
+                    key=f"auto_{cmpd_name}",
                 )
-                config[cmpd_name] = new_n
             with ccol3:
+                if is_auto:
+                    config[cmpd_name] = 0
+                    st.text("auto")
+                else:
+                    new_n = st.number_input(
+                        "Clusters",
+                        min_value=1, max_value=10,
+                        value=n_clust if n_clust >= 1 else 3,
+                        key=f"clust_{cmpd_name}", label_visibility="collapsed",
+                    )
+                    config[cmpd_name] = new_n
+            with ccol4:
                 if st.button("🗑️", key=f"rm_{cmpd_name}"):
                     to_remove.append(cmpd_name)
 
@@ -530,50 +542,148 @@ with tab3:
                 for eic in chrom.eics
             })
             new_cmpd = st.selectbox("Compound", options=all_eic_names, key="new_cluster_cmpd")
-            new_n_clusters = st.number_input("Number of clusters", min_value=2, max_value=10, value=3, key="new_n_clust")
+            new_auto = st.toggle("Auto-detect clusters", value=False, key="new_auto")
+            if new_auto:
+                new_n_clusters = 0
+            else:
+                new_n_clusters = st.number_input("Number of clusters", min_value=1, max_value=10, value=3, key="new_n_clust")
             if st.button("Add"):
                 config[new_cmpd] = new_n_clusters
                 st.rerun()
 
         st.divider()
 
-        if st.button("▶️  Run Clustering", use_container_width=True, type="primary"):
-            if not config:
-                st.warning("Add at least one compound to cluster.")
-            else:
-                with st.spinner("Clustering peaks..."):
+        btn_col1, btn_col2 = st.columns(2)
+
+        with btn_col1:
+            if st.button("▶️  Run Clustering", use_container_width=True, type="primary"):
+                if not config:
+                    st.warning("Add at least one compound to cluster.")
+                else:
+                    with st.spinner("Clustering peaks..."):
+                        try:
+                            exp_clust = copy.deepcopy(exp_pre_cluster)
+                            exp_clust = exp_clust.point_cluster_batch(dict(config))
+                            st.session_state["exp_clustered"] = exp_clust
+                            st.session_state["results_df"] = None
+
+                            st.markdown("""
+                            <div class="success-banner">
+                                ✅ <strong>Clustering complete!</strong> Check the Visualization tab to see the results.
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                        except Exception as e:
+                            st.error(f"Clustering failed: {e}")
+
+        with btn_col2:
+            if st.button("🤖 Auto-Cluster All Compounds", use_container_width=True):
+                with st.spinner("Auto-detecting clusters for all compounds..."):
                     try:
+                        # Collect all unique EIC compound names
+                        all_eic_cmpds = sorted({
+                            eic.name
+                            for chrom in exp_pre_cluster.chromatograms.values()
+                            for eic in chrom.eics
+                            if any(p.name == eic.name for p in eic.picked)  # only if it has picked peaks
+                        })
+                        auto_config = {cmpd: 0 for cmpd in all_eic_cmpds}
+
                         exp_clust = copy.deepcopy(exp_pre_cluster)
-                        exp_clust = exp_clust.point_cluster_batch(dict(config))
+                        exp_clust = exp_clust.point_cluster_batch(auto_config)
                         st.session_state["exp_clustered"] = exp_clust
                         st.session_state["results_df"] = None
 
                         st.markdown("""
                         <div class="success-banner">
-                            ✅ <strong>Clustering complete!</strong> Check the Visualization tab to see the results.
+                            ✅ <strong>Auto-clustering complete!</strong> Check the Visualization tab to see the results.
                         </div>
                         """, unsafe_allow_html=True)
 
-                        # Show cluster summary
-                        clustered_names = sorted({
-                            p.name
-                            for chrom in exp_clust.chromatograms.values()
-                            for eic in chrom.eics
-                            for p in eic.picked
-                        })
-                        st.markdown("**Resulting compound groups:**")
-                        for n in clustered_names:
-                            count = sum(
-                                1
-                                for chrom in exp_clust.chromatograms.values()
-                                for eic in chrom.eics
-                                for p in eic.picked
-                                if p.name == n
-                            )
-                            st.markdown(f"- `{n}`: {count} peaks")
-
                     except Exception as e:
-                        st.error(f"Clustering failed: {e}")
+                        st.error(f"Auto-clustering failed: {e}")
+
+        # Show cluster summary and before/after plots if clustering has been done
+        exp_clust_display = st.session_state.get("exp_clustered")
+        if exp_clust_display is not None:
+            clustered_names = sorted({
+                p.name
+                for chrom in exp_clust_display.chromatograms.values()
+                for eic in chrom.eics
+                for p in eic.picked
+            })
+            st.markdown("**Resulting compound groups:**")
+            for n in clustered_names:
+                count = sum(
+                    1
+                    for chrom in exp_clust_display.chromatograms.values()
+                    for eic in chrom.eics
+                    for p in eic.picked
+                    if p.name == n
+                )
+                st.markdown(f"- `{n}`: {count} peaks")
+
+            # ── Before / After peak distribution ──
+            st.divider()
+            st.markdown("#### Peak Distribution — Before vs After Clustering")
+
+            # Build "before" data from the pre-cluster experiment
+            before_data: dict[str, dict] = {}
+            for sname, chrom in exp_pre_cluster.chromatograms.items():
+                for eic in chrom.eics:
+                    for p in eic.picked:
+                        before_data.setdefault(p.name, {"rt": [], "into": [], "sample": []})
+                        before_data[p.name]["rt"].append(p.rt)
+                        before_data[p.name]["into"].append(p.into)
+                        before_data[p.name]["sample"].append(sname)
+
+            # Build "after" data from the clustered experiment
+            after_data: dict[str, dict] = {}
+            for sname, chrom in exp_clust_display.chromatograms.items():
+                for eic in chrom.eics:
+                    for p in eic.picked:
+                        after_data.setdefault(p.name, {"rt": [], "into": [], "sample": []})
+                        after_data[p.name]["rt"].append(p.rt)
+                        after_data[p.name]["into"].append(p.into)
+                        after_data[p.name]["sample"].append(sname)
+
+            fig_before = go.Figure()
+            for name, g in sorted(before_data.items()):
+                fig_before.add_trace(go.Scatter(
+                    x=g["rt"], y=g["into"], mode="markers",
+                    name=name, customdata=g["sample"],
+                    hovertemplate="rt=%{x:.2f}<br>into=%{y:.2e}<br>sample=%{customdata}<extra></extra>",
+                    marker=dict(size=5, opacity=0.7),
+                ))
+            fig_before.update_layout(
+                title="Before Clustering",
+                xaxis_title="RT (s)", yaxis_title="Integrated Area",
+                template="simple_white", height=400,
+                margin=dict(l=50, r=20, t=40, b=40),
+                legend=dict(font=dict(size=9)),
+            )
+
+            fig_after = go.Figure()
+            for name, g in sorted(after_data.items()):
+                fig_after.add_trace(go.Scatter(
+                    x=g["rt"], y=g["into"], mode="markers",
+                    name=name, customdata=g["sample"],
+                    hovertemplate="rt=%{x:.2f}<br>into=%{y:.2e}<br>sample=%{customdata}<extra></extra>",
+                    marker=dict(size=5, opacity=0.7),
+                ))
+            fig_after.update_layout(
+                title="After Clustering",
+                xaxis_title="RT (s)", yaxis_title="Integrated Area",
+                template="simple_white", height=400,
+                margin=dict(l=50, r=20, t=40, b=40),
+                legend=dict(font=dict(size=9)),
+            )
+
+            bcol, acol = st.columns(2)
+            with bcol:
+                st.plotly_chart(fig_before, use_container_width=True)
+            with acol:
+                st.plotly_chart(fig_after, use_container_width=True)
 
 
 # ════════════════════════════════════════════
@@ -584,7 +694,7 @@ with tab4:
     st.markdown("""
     <div class="step-header">
         <h2>📈 Step 4 — Integration & Export</h2>
-        <p>Fit Gaussian models, compute peak areas, and export results.</p>
+        <p>Fit peak models (Gaussian, EMG, or Bi-Gaussian), compute areas, and export results.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -610,11 +720,19 @@ with tab4:
 
         with col2:
             st.markdown("#### Parameters")
+            model_labels = {"gaussian": "Gaussian", "emg": "EMG (Exp. Modified Gaussian)", "bigauss": "Bi-Gaussian"}
+            selected_model = st.selectbox(
+                "Peak model",
+                options=list(VALID_MODELS),
+                format_func=lambda m: model_labels.get(m, m),
+                index=0,
+            )
             min_points = st.number_input("Min data points", value=11, min_value=5, max_value=50)
             savgol_window = st.number_input("Savgol window", value=11, min_value=5, max_value=51, step=2)
             savgol_poly = st.number_input("Savgol poly order", value=3, min_value=1, max_value=7)
             prominence_frac = st.slider("Prominence threshold", 0.01, 0.20, 0.05, 0.01)
-            generate_pdf = st.toggle("📄 Generate Gaussian overlay PDF", value=False)
+            subtract_bl = st.toggle("📉 Subtract baseline", value=True)
+            generate_pdf = st.toggle("📄 Generate peak overlay PDF", value=False)
 
         st.divider()
 
@@ -622,7 +740,7 @@ with tab4:
             if not target_cmpds:
                 st.warning("Select at least one compound.")
             else:
-                with st.spinner("Fitting Gaussians and integrating peaks..."):
+                with st.spinner(f"Fitting {model_labels[selected_model]} models and integrating peaks..."):
                     try:
                         # Save experiment to a temp pickle so integrate_experiment can load it
                         import tempfile
@@ -641,6 +759,8 @@ with tab4:
                             output_csv=None,
                             output_pdf=pdf_tmp.name if pdf_tmp else None,
                             target_cmpds=target_cmpds,
+                            fit_model=selected_model,
+                            subtract_baseline=subtract_bl,
                             min_points=min_points,
                             savgol_window=savgol_window,
                             savgol_poly=savgol_poly,
