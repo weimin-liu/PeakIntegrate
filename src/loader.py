@@ -23,9 +23,8 @@ from PeakIntegrate.src.models import (
 
 
 def load_experiment(
-    datafolder: str = "/Users/weimin/10-Project/GDGT_peak_integration/AEGIS_data/tables",
-    hdf5_path: str = "/Users/weimin/10-Project/GDGT_peak_integration/AEGIS_data/chrom_data.h5",
-    sample_regex: str = r"AEGIS-(\d+)",
+    datafolder: str = "/Users/weimin/Downloads/KapK/tables",
+    hdf5_path: str = "/Users/weimin/Downloads/KapK/chrom_data.h5",
 ) -> Experiment:
     """Load an :class:`Experiment` from CSV peak-pick tables and an HDF5 file.
 
@@ -42,7 +41,6 @@ def load_experiment(
     """
     import h5py
 
-    reg = re.compile(sample_regex)
 
     # Read all CSVs into a dict keyed by compound name
     data: dict[str, pd.DataFrame] = {}
@@ -52,9 +50,7 @@ def load_experiment(
         if not filename.endswith(".csv"):
             continue
         df = pd.read_csv(os.path.join(datafolder, filename))
-        df["SampleName"] = df.iloc[:, 0].map(
-            lambda x, _reg=reg: f"AEGIS-{_reg.findall(str(x))[0]}"
-        )
+        df["SampleName"] = df.iloc[:, 0]
         sample_names_set.update(df["SampleName"].unique())
         data[filename.split(".")[0]] = df
 
@@ -113,11 +109,6 @@ def main() -> None:
 
     exp = load_experiment()
     exp = exp.rt_shift()
-    exp = exp.rt_shift(
-        manual_anchors={
-            "AEGIS-158": [(2512, 2534)],
-        }
-    )
     exp = exp.point_cluster_batch({
         "brGDGT_IIIa": 3,
         "brGDGT_IIa": 2,

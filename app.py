@@ -152,11 +152,6 @@ with st.sidebar:
         value="/Users/weimin/chrom_data.h5",
         help="Path to the raw EIC data file",
     )
-    sample_regex = st.text_input(
-        "Sample regex",
-        value=r"AEGIS-(\d+)",
-        help="Regex to extract sample name from CSV rows",
-    )
 
     if st.button("🚀 Load Data", use_container_width=True, type="primary"):
         with st.spinner("Loading experiment..."):
@@ -164,7 +159,6 @@ with st.sidebar:
                 exp = load_experiment(
                     datafolder=datafolder,
                     hdf5_path=hdf5_path,
-                    sample_regex=sample_regex,
                 )
                 st.session_state["exp"] = exp
                 st.session_state["exp_corrected"] = None
@@ -620,6 +614,7 @@ with tab4:
             savgol_window = st.number_input("Savgol window", value=11, min_value=5, max_value=51, step=2)
             savgol_poly = st.number_input("Savgol poly order", value=3, min_value=1, max_value=7)
             prominence_frac = st.slider("Prominence threshold", 0.01, 0.20, 0.05, 0.01)
+            generate_pdf = st.toggle("📄 Generate Gaussian overlay PDF", value=False)
 
         st.divider()
 
@@ -635,9 +630,16 @@ with tab4:
                         pickle.dump(exp_int, tmp, protocol=pickle.HIGHEST_PROTOCOL)
                         tmp.close()
 
+                        # Prepare PDF output path if requested
+                        pdf_tmp = None
+                        if generate_pdf:
+                            pdf_tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                            pdf_tmp.close()
+
                         df = integrate_experiment(
                             pkl_path=tmp.name,
                             output_csv=None,
+                            output_pdf=pdf_tmp.name if pdf_tmp else None,
                             target_cmpds=target_cmpds,
                             min_points=min_points,
                             savgol_window=savgol_window,
@@ -645,6 +647,14 @@ with tab4:
                             prominence_frac=prominence_frac,
                         )
                         os.unlink(tmp.name)
+
+                        # Read PDF bytes into session state for download
+                        if pdf_tmp and os.path.exists(pdf_tmp.name):
+                            with open(pdf_tmp.name, "rb") as pf:
+                                st.session_state["results_pdf"] = pf.read()
+                            os.unlink(pdf_tmp.name)
+                        else:
+                            st.session_state["results_pdf"] = None
 
                         st.session_state["results_df"] = df
 
@@ -690,7 +700,7 @@ with tab4:
 
             # ── Export buttons ──
             st.markdown("#### Export")
-            ecol1, ecol2, ecol3 = st.columns(3)
+            ecol1, ecol2, ecol3, ecol4 = st.columns(4)
 
             with ecol1:
                 csv_data = results_df.to_csv()
@@ -703,6 +713,24 @@ with tab4:
                 )
 
             with ecol2:
+                pdf_bytes = st.session_state.get("results_pdf")
+                if pdf_bytes:
+                    st.download_button(
+                        "📄 Download PDF",
+                        data=pdf_bytes,
+                        file_name="gaussian_overlays.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                else:
+                    st.button(
+                        "📄 No PDF generated",
+                        disabled=True,
+                        use_container_width=True,
+                        help="Enable 'Generate Gaussian overlay PDF' and re-run integration.",
+                    )
+
+            with ecol3:
                 save_path = st.text_input(
                     "Save CSV to path",
                     value="results.csv",
@@ -715,7 +743,7 @@ with tab4:
                     except Exception as e:
                         st.error(f"Failed: {e}")
 
-            with ecol3:
+            with ecol4:
                 pkl_save_path = st.text_input(
                     "Save experiment to",
                     value="experiment.pkl",

@@ -38,14 +38,14 @@ if (is.null(SCRIPT_DIR) || length(SCRIPT_DIR) == 0 || SCRIPT_DIR == "") {
   SCRIPT_DIR <- "."
 }
 #PROJECT_ROOT <- normalizePath(file.path(SCRIPT_DIR, ".."), mustWork = FALSE)
-PROJECT_ROOT <- "/Users/weimin/10-Project/GDGT_peak_integration/AEGIS_data/"
+PROJECT_ROOT <- "/Users/weimin/Downloads/KapK"
 
 # --- Paths ---
 MZML_DIR <- file.path(PROJECT_ROOT, "mzml") # Input mzML folder
-CMPDS_YAML <- "/Users/weimin/10-Project/GDGT_peak_integration/PeakIntegrate/config/cmpds.yaml"
+CMPDS_YAML <- "/Users/weimin/Project/PeakIntegrate/config/cmpds.yaml"
 HDF5_OUT <- file.path(PROJECT_ROOT, "chrom_data.h5")
 CSV_OUT_DIR <- file.path(PROJECT_ROOT, "tables") # per-compound CSVs
-RDS_OUT <- file.path(PROJECT_ROOT, "AEGIS_emily.rds")
+RDS_OUT <- file.path(PROJECT_ROOT, "KapK.rds")
 
 # --- Parallelism ---
 N_CORES <- 4L

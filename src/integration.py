@@ -3,22 +3,26 @@ integration.py — Gaussian peak deconvolution and integration.
 
 Loads a pickled :class:`Experiment`, fits single or double Gaussian models
 to each target compound's EIC, and exports integrated areas to CSV.
+Optionally produces a multi-page PDF with Gaussian overlays on the raw EICs.
 
 Usage::
 
     python -m PeakIntegrate.src.integration                   # defaults
     python -m PeakIntegrate.src.integration --pkl exp.pkl     # custom
+    python -m PeakIntegrate.src.integration --pdf results.pdf # with PDF
 
 Or programmatically::
 
     from PeakIntegrate.src.integration import integrate_experiment
-    df = integrate_experiment("experiment.pkl")
+    df = integrate_experiment("experiment.pkl", output_pdf="results.pdf")
 """
 
 from __future__ import annotations
 
 import os
 import pickle
+from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 from scipy.optimize import curve_fit
@@ -51,6 +55,26 @@ def double_gauss(
 
 
 # ════════════════════════════════════════════
+#  Fit Result Container
+# ════════════════════════════════════════════
+
+@dataclass
+class FitResult:
+    """Stores everything needed to plot a single fit overlay."""
+    compound: str
+    sample: str
+    x: np.ndarray                   # RT values in the fit window
+    y_raw: np.ndarray               # raw intensity (before smoothing)
+    y_smoothed: np.ndarray          # Savgol-smoothed intensity
+    fit_type: str                   # "single" or "double"
+    chosen_A: float = 0.0           # amplitude of the chosen Gaussian
+    chosen_mu: float = 0.0          # centre of the chosen Gaussian
+    chosen_sigma: float = 0.0       # sigma of the chosen Gaussian
+    area: float = np.nan            # integrated area
+    rtmed: float = 0.0              # expected RT
+
+
+# ════════════════════════════════════════════
 #  Target Compounds (derived from cmpds.yaml)
 # ════════════════════════════════════════════
 
@@ -75,12 +99,79 @@ TARGET_COMPOUNDS: list[str] = _default_target_compounds()
 
 
 # ════════════════════════════════════════════
+#  PDF Export
+# ════════════════════════════════════════════
+
+def _export_fit_pdf(fit_results: list[FitResult], output_pdf: str) -> None:
+    """Write all fit overlays to a multi-page PDF.
+
+    Each page shows one (compound, sample) pair with:
+      - Grey line: raw EIC intensity
+      - Black line: Savgol-smoothed EIC
+      - Coloured filled curve: the chosen fitted Gaussian
+      - Dashed vertical line: expected RT (rtmed)
+      - Title with compound, sample, and integrated area
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    # Group by compound, then sort samples within each compound
+    from collections import OrderedDict
+    grouped: dict[str, list[FitResult]] = OrderedDict()
+    for fr in fit_results:
+        grouped.setdefault(fr.compound, []).append(fr)
+    for v in grouped.values():
+        v.sort(key=lambda fr: fr.sample)
+
+    with PdfPages(output_pdf) as pdf:
+        for cmpd, results in grouped.items():
+            for fr in results:
+                fig, ax = plt.subplots(figsize=(8, 4))
+
+                # Raw EIC
+                ax.plot(fr.x, fr.y_raw, color="0.70", linewidth=0.8,
+                        label="raw EIC")
+                # Smoothed EIC
+                ax.plot(fr.x, fr.y_smoothed, color="black", linewidth=1.0,
+                        label="smoothed EIC")
+
+                # Fitted Gaussian overlay (only if fit succeeded)
+                if np.isfinite(fr.area) and fr.chosen_A > 0:
+                    x_fine = np.linspace(fr.x.min(), fr.x.max(), 500)
+                    y_fit = gauss(x_fine, fr.chosen_A, fr.chosen_mu,
+                                  fr.chosen_sigma)
+                    ax.fill_between(x_fine, y_fit, alpha=0.35,
+                                    color="tab:blue", label="fitted Gaussian")
+                    ax.plot(x_fine, y_fit, color="tab:blue", linewidth=1.2)
+
+                # Expected RT
+                ax.axvline(fr.rtmed, color="tab:red", linestyle="--",
+                           linewidth=0.8, label=f"expected RT ({fr.rtmed:.1f})")
+
+                area_str = f"{fr.area:.2e}" if np.isfinite(fr.area) else "N/A"
+                ax.set_title(f"{fr.compound}  —  {fr.sample}  "
+                             f"(area = {area_str})", fontsize=10)
+                ax.set_xlabel("RT (s)")
+                ax.set_ylabel("Intensity")
+                ax.legend(fontsize=7, loc="upper right")
+                fig.tight_layout()
+
+                pdf.savefig(fig)
+                plt.close(fig)
+
+    print(f"\nPDF saved to '{output_pdf}' ({sum(len(v) for v in grouped.values())} pages).")
+
+
+# ════════════════════════════════════════════
 #  Integration Pipeline
 # ════════════════════════════════════════════
 
 def integrate_experiment(
     pkl_path: str = "../../experiment.pkl",
     output_csv: str = "results.csv",
+    output_pdf: str | None = None,
     target_cmpds: list[str] | None = None,
     min_points: int = 11,
     savgol_window: int = 11,
@@ -92,6 +183,8 @@ def integrate_experiment(
     Parameters:
         pkl_path:        Path to the pickled :class:`Experiment`.
         output_csv:      Path for the output CSV (``None`` to skip).
+        output_pdf:      Path for the output PDF with Gaussian overlays
+                         (``None`` to skip).
         target_cmpds:    Compounds to process. Defaults to :data:`TARGET_COMPOUNDS`.
         min_points:      Minimum data points required for fitting.
         savgol_window:   Savitzky–Golay smoothing window length.
@@ -110,6 +203,7 @@ def integrate_experiment(
         exp: Experiment = pickle.load(f)
 
     all_results: dict[str, dict[str, float]] = {}
+    fit_results: list[FitResult] = []
 
     for cmpd in target_cmpds:
         print(f"Processing {cmpd}...")
@@ -164,8 +258,6 @@ def integrate_experiment(
                 peaks_indices, _ = find_peaks(y_s, prominence=max_intensity * prominence_frac)
                 num_peaks = len(peaks_indices)
 
-            if sample_name == 'AEGIS-139' and cmpd == 'brGDGT_IIIa_1':
-                print('yeah')
             if num_peaks == 0:
                 x = rt[mask]
                 y = intensity[mask]
@@ -177,6 +269,7 @@ def integrate_experiment(
                 num_peaks = 1
 
             area_main = np.nan
+            chosen_A, chosen_mu, chosen_sigma = 0.0, 0.0, 0.0
 
             # Single peak → single Gaussian
             if num_peaks == 1:
@@ -191,6 +284,7 @@ def integrate_experiment(
                     )
                     A, mu, sigma = popt
                     area_main = A * sigma * np.sqrt(2 * np.pi)
+                    chosen_A, chosen_mu, chosen_sigma = A, mu, sigma
                 except Exception:
                     pass
 
@@ -212,13 +306,31 @@ def integrate_experiment(
                     A1, mu1, sigma1, A2, mu2, sigma2 = popt
                     if abs(mu1 - rtmed) < abs(mu2 - rtmed):
                         area_main = A1 * sigma1 * np.sqrt(2 * np.pi)
+                        chosen_A, chosen_mu, chosen_sigma = A1, mu1, sigma1
                     else:
                         area_main = A2 * sigma2 * np.sqrt(2 * np.pi)
+                        chosen_A, chosen_mu, chosen_sigma = A2, mu2, sigma2
                 except Exception:
                     pass
 
 
             cmpd_results[sample_name] = area_main
+
+            # Store fit result for PDF plotting
+            if output_pdf is not None:
+                fit_results.append(FitResult(
+                    compound=cmpd,
+                    sample=sample_name,
+                    x=x.copy(),
+                    y_raw=y.copy() if 'y' in dir() else y_s.copy(),
+                    y_smoothed=y_s.copy(),
+                    fit_type="single" if num_peaks == 1 else "double",
+                    chosen_A=chosen_A,
+                    chosen_mu=chosen_mu,
+                    chosen_sigma=chosen_sigma,
+                    area=area_main,
+                    rtmed=rtmed,
+                ))
 
         all_results[cmpd] = cmpd_results
 
@@ -229,6 +341,9 @@ def integrate_experiment(
     if output_csv:
         results_df.to_csv(output_csv)
         print(f"\nResults saved to '{output_csv}'.")
+
+    if output_pdf and fit_results:
+        _export_fit_pdf(fit_results, output_pdf)
 
     return results_df
 
@@ -252,9 +367,13 @@ def main() -> None:
         "--out", default="results.csv",
         help="Output CSV path (default: results.csv)",
     )
+    parser.add_argument(
+        "--pdf", default=None,
+        help="Output PDF path for Gaussian overlay plots (default: None, no PDF)",
+    )
     args = parser.parse_args()
 
-    integrate_experiment(pkl_path=args.pkl, output_csv=args.out)
+    integrate_experiment(pkl_path=args.pkl, output_csv=args.out, output_pdf=args.pdf)
 
 
 if __name__ == "__main__":
