@@ -41,6 +41,7 @@ from PeakIntegrate.src.models import (  # noqa: F401 — pickle needs these
 
 # Allowed model names
 VALID_MODELS = ("gaussian", "emg", "bigauss")
+VALID_BASELINE_SCOPES = ("narrow", "global")
 
 
 # ════════════════════════════════════════════
@@ -138,7 +139,14 @@ def _single_area(popt: tuple, model: str) -> float:
     elif model == "bigauss":
         A, mu, sigma_l, sigma_r = popt
         return _bigauss_area(A, sigma_l, sigma_r)
-    raise ValueError(f"Unknown model: {model}")
+
+
+def _as_trace_array(values: object) -> np.ndarray:
+    """Return a 1-D float trace array, tolerating missing/scalar inputs."""
+    if values is None:
+        return np.array([], dtype=float)
+    arr = np.asarray(values, dtype=float)
+    return np.atleast_1d(arr)
 
 
 # ════════════════════════════════════════════
@@ -149,6 +157,7 @@ def _single_area(popt: tuple, model: str) -> float:
 class FitResult:
     """Stores everything needed to plot a single fit overlay."""
     compound: str
+    eic_name: str
     sample: str
     x: np.ndarray                   # RT values in the fit window
     y_raw: np.ndarray               # raw intensity (before smoothing)
@@ -159,6 +168,7 @@ class FitResult:
     chosen_popt: tuple = ()         # optimised parameters for chosen peak
     area: float = np.nan            # integrated area
     rtmed: float = 0.0              # expected RT
+    x_fit: np.ndarray = field(default_factory=lambda: np.array([]))  # sub-window used for fitting
 
     # Legacy convenience (used by gauss-only path; kept for compat)
     @property
@@ -204,7 +214,7 @@ MODEL_LABELS = {
 }
 
 def _export_fit_pdf(fit_results: list[FitResult], output_pdf: str) -> None:
-    """Write all fit overlays to a multi-page PDF."""
+    """Write one PDF page per sample with all integrated peaks overlaid."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -213,52 +223,186 @@ def _export_fit_pdf(fit_results: list[FitResult], output_pdf: str) -> None:
     from collections import OrderedDict
     grouped: dict[str, list[FitResult]] = OrderedDict()
     for fr in fit_results:
-        grouped.setdefault(fr.compound, []).append(fr)
+        grouped.setdefault(fr.sample, []).append(fr)
     for v in grouped.values():
-        v.sort(key=lambda fr: fr.sample)
+        v.sort(key=lambda fr: (fr.eic_name, fr.compound))
 
     with PdfPages(output_pdf) as pdf:
-        for cmpd, results in grouped.items():
+        for sample, results in grouped.items():
+            fig, ax = plt.subplots(figsize=(8, 4))
+            colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["tab:blue"])
+            eic_groups: dict[str, list[FitResult]] = OrderedDict()
             for fr in results:
-                fig, ax = plt.subplots(figsize=(8, 4))
+                eic_groups.setdefault(fr.eic_name, []).append(fr)
 
-                ax.plot(fr.x, fr.y_raw, color="0.70", linewidth=0.8,
-                        label="raw EIC")
-                ax.plot(fr.x, fr.y_smoothed, color="black", linewidth=1.0,
-                        label="smoothed EIC")
+            expected_line_drawn = False
+            for idx, (eic_name, eic_results) in enumerate(eic_groups.items()):
+                color = colors[idx % len(colors)]
+                base = eic_results[0]
 
-                # Baseline
-                if fr.baseline is not None and len(fr.baseline) > 0:
-                    ax.plot(fr.x, fr.baseline, color="tab:orange",
-                            linestyle=":", linewidth=0.9, label="baseline")
+                ax.plot(base.x, base.y_raw, color=color, linewidth=0.7,
+                        alpha=0.18, label=f"{eic_name} raw")
+                ax.plot(base.x, base.y_smoothed, color=color, linewidth=1.0,
+                        alpha=0.45, label=f"{eic_name} smoothed")
 
-                # Fitted model overlay
-                if np.isfinite(fr.area) and fr.chosen_A > 0 and len(fr.chosen_popt) > 0:
-                    x_fine = np.linspace(fr.x.min(), fr.x.max(), 500)
-                    y_model = _eval_single_model(x_fine, fr.chosen_popt, fr.model_name)
-                    bl_fine = np.interp(x_fine, fr.x, fr.baseline)
-                    y_fit = y_model + bl_fine
-                    label = f"fitted {MODEL_LABELS.get(fr.model_name, fr.model_name)}"
-                    ax.fill_between(x_fine, bl_fine, y_fit, alpha=0.35,
-                                    color="tab:blue", label=label)
-                    ax.plot(x_fine, y_fit, color="tab:blue", linewidth=1.2)
+                if base.baseline is not None and len(base.baseline) > 0:
+                    ax.plot(base.x, base.baseline, color=color,
+                            linestyle=":", linewidth=0.8, alpha=0.6,
+                            label=f"{eic_name} baseline")
 
-                ax.axvline(fr.rtmed, color="tab:red", linestyle="--",
-                           linewidth=0.8, label=f"expected RT ({fr.rtmed:.1f})")
+                if not expected_line_drawn:
+                    ax.axvline(base.rtmed, color="tab:red", linestyle="--",
+                               linewidth=0.8, label=f"expected RT ({base.rtmed:.1f})")
+                    expected_line_drawn = True
 
-                area_str = f"{fr.area:.2e}" if np.isfinite(fr.area) else "N/A"
-                model_tag = MODEL_LABELS.get(fr.model_name, fr.model_name)
-                ax.set_title(f"{fr.compound}  —  {fr.sample}  "
-                             f"(area = {area_str}, {model_tag})", fontsize=10)
-                ax.set_xlabel("RT (s)")
-                ax.set_ylabel("Intensity")
-                ax.legend(fontsize=7, loc="upper right")
-                fig.tight_layout()
+                for fr in eic_results:
+                    if np.isfinite(fr.area) and fr.chosen_A > 0 and len(fr.chosen_popt) > 0:
+                        x_range = fr.x_fit if len(fr.x_fit) >= 2 else fr.x
+                        x_fine = np.linspace(x_range.min(), x_range.max(), 500)
+                        y_model = _eval_single_model(x_fine, fr.chosen_popt, fr.model_name)
+                        bl_fine = np.interp(x_fine, fr.x, fr.baseline)
+                        y_fit = y_model + bl_fine
+                        model_tag = MODEL_LABELS.get(fr.model_name, fr.model_name)
+                        area_str = f"{fr.area:.2e}"
+                        label = f"{fr.compound} ({model_tag}, {area_str})"
+                        ax.fill_between(x_fine, bl_fine, y_fit, alpha=0.20,
+                                        color=color, label=label)
+                        ax.plot(x_fine, y_fit, color=color, linewidth=1.3)
+                        ax.axvline(fr.chosen_mu, color=color, linestyle="--", linewidth=0.8)
 
-                pdf.savefig(fig)
-                plt.close(fig)
+            ax.set_title(sample, fontsize=10)
+            ax.set_xlabel("RT (s)")
+            ax.set_ylabel("Intensity")
+            ax.legend(fontsize=7, loc="upper right")
+            fig.tight_layout()
 
-    print(f"\nPDF saved to '{output_pdf}' ({sum(len(v) for v in grouped.values())} pages).")
+            pdf.savefig(fig)
+            plt.close(fig)
+
+    print(f"\nPDF saved to '{output_pdf}' ({len(grouped)} pages).")
+
+
+def build_sample_overlay_figures(fit_results: list[FitResult]) -> dict[str, object]:
+    """Build one interactive Plotly figure per sample."""
+    import plotly.graph_objects as go
+    from collections import OrderedDict
+
+    grouped: dict[str, list[FitResult]] = OrderedDict()
+    for fr in fit_results:
+        grouped.setdefault(fr.sample, []).append(fr)
+    for v in grouped.values():
+        v.sort(key=lambda fr: (fr.eic_name, fr.compound))
+
+    figures: dict[str, object] = {}
+    colors = [
+        "#0f766e", "#c2410c", "#1d4ed8", "#b91c1c", "#6d28d9",
+        "#15803d", "#be185d", "#7c2d12", "#0369a1", "#4d7c0f",
+    ]
+
+    for sample, results in grouped.items():
+        fig = go.Figure()
+        eic_groups: dict[str, list[FitResult]] = OrderedDict()
+        for fr in results:
+            eic_groups.setdefault(fr.eic_name, []).append(fr)
+
+        for idx, (eic_name, eic_results) in enumerate(eic_groups.items()):
+            color = colors[idx % len(colors)]
+            base = eic_results[0]
+
+            fig.add_trace(go.Scatter(
+                x=base.x, y=base.y_raw,
+                mode="lines",
+                name=f"{eic_name} raw",
+                line=dict(color=color, width=1),
+                opacity=0.18,
+                legendgroup=eic_name,
+                hovertemplate=f"{eic_name} raw<extra></extra>",
+            ))
+            fig.add_trace(go.Scatter(
+                x=base.x, y=base.y_smoothed,
+                mode="lines",
+                name=f"{eic_name} smoothed",
+                line=dict(color=color, width=2),
+                opacity=0.45,
+                legendgroup=eic_name,
+                hovertemplate=f"{eic_name} smoothed<extra></extra>",
+            ))
+
+            if base.baseline is not None and len(base.baseline) > 0:
+                fig.add_trace(go.Scatter(
+                    x=base.x, y=base.baseline,
+                    mode="lines",
+                    name=f"{eic_name} baseline",
+                    line=dict(color=color, width=1, dash="dot"),
+                    opacity=0.7,
+                    legendgroup=eic_name,
+                    hovertemplate=f"{eic_name} baseline<extra></extra>",
+                ))
+
+            for fr_idx, fr in enumerate(eic_results):
+                if not (np.isfinite(fr.area) and fr.chosen_A > 0 and len(fr.chosen_popt) > 0):
+                    continue
+                fit_color = colors[(idx + fr_idx) % len(colors)]
+                x_range = fr.x_fit if len(fr.x_fit) >= 2 else fr.x
+                x_fine = np.linspace(x_range.min(), x_range.max(), 500)
+                y_model = _eval_single_model(x_fine, fr.chosen_popt, fr.model_name)
+                bl_fine = np.interp(x_fine, fr.x, fr.baseline)
+                y_fit = y_model + bl_fine
+                fill_x = np.concatenate([x_fine, x_fine[::-1]])
+                fill_y = np.concatenate([y_fit, bl_fine[::-1]])
+                fig.add_trace(go.Scatter(
+                    x=fill_x, y=fill_y,
+                    mode="lines",
+                    fill="toself",
+                    fillcolor=fit_color,
+                    opacity=0.18,
+                    line=dict(color="rgba(0,0,0,0)"),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    legendgroup=eic_name,
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_fine, y=y_fit,
+                    mode="lines",
+                    name=fr.compound,
+                    line=dict(color=fit_color, width=2.5),
+                    legendgroup=eic_name,
+                    hovertemplate=f"{fr.compound}<extra></extra>",
+                ))
+                peak_y = float(np.nanmax(y_fit))
+                fig.add_trace(go.Scatter(
+                    x=[fr.chosen_mu, fr.chosen_mu],
+                    y=[peak_y, peak_y],
+                    mode="lines",
+                    line=dict(color=fit_color, width=1, dash="dash"),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    legendgroup=eic_name,
+                ))
+                fig.add_annotation(
+                    x=fr.chosen_mu,
+                    y=0.98,
+                    text=fr.compound,
+                    showarrow=False,
+                    textangle=-90,
+                    font=dict(color=fit_color, size=12),
+                    xanchor="center",
+                    yanchor="top",
+                    yref="paper",
+                )
+
+        fig.update_layout(
+            title=sample,
+            xaxis_title="RT (s)",
+            yaxis_title="Intensity",
+            template="plotly_white",
+            hovermode="x unified",
+            legend=dict(orientation="v"),
+            margin=dict(l=40, r=20, t=110, b=40),
+        )
+        figures[sample] = fig
+
+    return figures
 
 
 # ════════════════════════════════════════════
@@ -285,6 +429,13 @@ def _estimate_baseline(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     baseline = np.clip(baseline, 0, None)
 
     return baseline
+
+
+def _smooth_trace(y: np.ndarray, window_length: int, polyorder: int) -> np.ndarray:
+    """Smooth a trace when enough points are available, else return it unchanged."""
+    if len(y) < window_length:
+        return y.copy()
+    return savgol_filter(y, window_length=window_length, polyorder=polyorder)
 
 
 # ════════════════════════════════════════════
@@ -430,6 +581,37 @@ def _fit_double_peak(
 
 
 # ════════════════════════════════════════════
+#  Peak Sub-window Helper
+# ════════════════════════════════════════════
+
+def _find_peak_subwindow(
+    y: np.ndarray, apex_idx: int, all_peak_indices: list[int]
+) -> tuple[int, int]:
+    """Return (left_idx, right_idx) bounding the sub-window for one peak.
+
+    Boundaries are placed at the valley between this peak and its nearest
+    neighbours. If there is no neighbour on a side the boundary is the edge
+    of the array.
+    """
+    sorted_peaks = sorted(all_peak_indices)
+    pos = sorted_peaks.index(apex_idx)
+
+    if pos > 0:
+        prev_peak = sorted_peaks[pos - 1]
+        left_i = prev_peak + int(np.argmin(y[prev_peak : apex_idx + 1]))
+    else:
+        left_i = 0
+
+    if pos < len(sorted_peaks) - 1:
+        next_peak = sorted_peaks[pos + 1]
+        right_i = apex_idx + int(np.argmin(y[apex_idx : next_peak + 1]))
+    else:
+        right_i = len(y) - 1
+
+    return left_i, right_i
+
+
+# ════════════════════════════════════════════
 #  Integration Pipeline
 # ════════════════════════════════════════════
 
@@ -440,15 +622,20 @@ def integrate_experiment(
     target_cmpds: list[str] | None = None,
     fit_model: str = "gaussian",
     subtract_baseline: bool = True,
+    baseline_scope: str = "narrow",
     min_points: int = 11,
     savgol_window: int = 11,
     savgol_poly: int = 3,
     prominence_frac: float = 0.05,
-) -> "pd.DataFrame":
+    propagate_consensus_splits: bool = True,
+    experiment: "Experiment | None" = None,
+    return_fit_results: bool = False,
+) -> "pd.DataFrame | tuple[pd.DataFrame, list[FitResult]]":
     """Integrate peaks for all target compounds in a saved Experiment.
 
     Parameters:
         pkl_path:        Path to the pickled :class:`Experiment`.
+                         Ignored when ``experiment`` is provided.
         output_csv:      Path for the output CSV (``None`` to skip).
         output_pdf:      Path for the output PDF with model overlays
                          (``None`` to skip).
@@ -458,10 +645,25 @@ def integrate_experiment(
                          (bi-Gaussian / split Gaussian).
         subtract_baseline: If ``True`` (default), subtract a linear baseline
                          estimated from the window edges before fitting.
+        baseline_scope:  Baseline estimation window. ``"narrow"`` uses the
+                         compound RT window only; ``"global"`` uses the full
+                         chromatogram trace and interpolates onto the fitting
+                         window.
         min_points:      Minimum data points required for fitting.
         savgol_window:   Savitzky–Golay smoothing window length.
         savgol_poly:     Savitzky–Golay polynomial order.
         prominence_frac: Peak prominence threshold (fraction of max intensity).
+        propagate_consensus_splits:
+                         If ``True``, multi-peak detections in some samples can
+                         propagate to other samples of the same compound via the
+                         compound-wide consensus logic.
+        experiment:      An already-loaded :class:`Experiment` object. When
+                         supplied, ``pkl_path`` is not used. Pass this from
+                         in-process callers (e.g. the Streamlit app) to avoid
+                         pickle class-identity mismatches.
+        return_fit_results:
+                         If ``True``, also return the per-fit metadata used for
+                         plotting interactive overlays.
 
     Returns:
         DataFrame with samples as rows, compounds as columns.
@@ -471,12 +673,20 @@ def integrate_experiment(
     fit_model = fit_model.lower()
     if fit_model not in VALID_MODELS:
         raise ValueError(f"fit_model must be one of {VALID_MODELS}, got '{fit_model}'")
+    baseline_scope = baseline_scope.lower()
+    if baseline_scope not in VALID_BASELINE_SCOPES:
+        raise ValueError(
+            f"baseline_scope must be one of {VALID_BASELINE_SCOPES}, got '{baseline_scope}'"
+        )
 
     if target_cmpds is None:
         target_cmpds = TARGET_COMPOUNDS
 
-    with open(pkl_path, "rb") as f:
-        exp: Experiment = pickle.load(f)
+    if experiment is not None:
+        exp: Experiment = experiment
+    else:
+        with open(pkl_path, "rb") as f:
+            exp: Experiment = pickle.load(f)
 
     all_results: dict[str, dict[str, float]] = {}
     fit_results: list[FitResult] = []
@@ -490,7 +700,12 @@ def integrate_experiment(
             print(f"  Skipping {cmpd}: Could not get RT ({e})")
             continue
 
-        cmpd_results: dict[str, float] = {}
+        # ══════════════════════════════════════════════════════════════════════
+        #  Pass 1 — independent peak detection per sample
+        # ══════════════════════════════════════════════════════════════════════
+        # Stores raw signal arrays keyed by sample; fitting happens in Pass 2
+        # after the compound-wide consensus peak count is established.
+        per_sample_peaks: dict[str, list] = {}
 
         for sample_name, chrom_obj in exp.chromatograms.items():
 
@@ -499,112 +714,281 @@ def integrate_experiment(
                 None,
             )
             if matching_eic is None:
-                cmpd_results[sample_name] = np.nan
+                per_sample_peaks[sample_name] = []   # sentinel: no EIC
                 continue
 
-            rt = np.asarray(matching_eic.shifted_rt, dtype=float)
-            intensity = np.asarray(matching_eic.intensity, dtype=float)
-
-            mask = (
-                (rt > rtmin) & (rt < rtmax)
-                & np.isfinite(rt) & np.isfinite(intensity)
+            rt = _as_trace_array(
+                matching_eic.shifted_rt
+                if matching_eic.shifted_rt is not None
+                else matching_eic.rt
             )
-            x = rt[mask]
-            y = intensity[mask]
-            y_s = savgol_filter(y, window_length=savgol_window, polyorder=savgol_poly)
+            intensity = _as_trace_array(matching_eic.intensity)
 
-            num_peaks = 0
-            n_iter = 0
-            while (num_peaks == 0) and (len(x) >= min_points):
-                print(len(x))
-                if not n_iter == 0:
-                    x = x[1:]
-                    y_s = y_s[1:]
-                n_iter += 1
-                if len(x) < min_points:
-                    cmpd_results[sample_name] = np.nan
-                    continue
+            if rt.size == 0 or intensity.size == 0 or rt.size != intensity.size:
+                per_sample_peaks[sample_name] = []   # invalid trace payload
+                continue
 
-                max_intensity = y_s.max()
+            finite_mask = np.isfinite(rt) & np.isfinite(intensity)
+            rt_full = rt[finite_mask]
+            intensity_full = intensity[finite_mask]
+            if len(rt_full) == 0 or len(intensity_full) == 0:
+                per_sample_peaks[sample_name] = []   # no finite signal
+                continue
 
-                if max_intensity <= 0:
-                    cmpd_results[sample_name] = 0.0
-                    continue
+            if len(rt_full) > 1:
+                order = np.argsort(rt_full)
+                rt_full = rt_full[order]
+                intensity_full = intensity_full[order]
 
-                peaks_indices, _ = find_peaks(y_s, prominence=max_intensity * prominence_frac)
-                num_peaks = len(peaks_indices)
+            mask = (rt_full > rtmin) & (rt_full < rtmax)
+            x = rt_full[mask]
+            y = intensity_full[mask]
+            if len(x) == 0 or len(y) == 0:
+                per_sample_peaks[sample_name] = []   # no signal in RT window
+                continue
 
-            if num_peaks == 0:
-                x = rt[mask]
-                y = intensity[mask]
-                y_s = savgol_filter(y, window_length=savgol_window, polyorder=savgol_poly)
-                cut = np.argmin(abs(rtmed - x))
-                x = x[cut:]
-                y_s = y_s[cut:]
-                y = y[cut:]
-                peaks_indices = [0]  # apex is now at index 0 after slicing
+            trace_smoothed = _smooth_trace(intensity_full, savgol_window, savgol_poly)
+
+            if len(y) < savgol_window:
+                y_s = y.copy()
+                peaks_indices = np.array([int(np.argmax(y))])
                 num_peaks = 1
+            else:
+                y_s = _smooth_trace(y, savgol_window, savgol_poly)
 
-            area_main = np.nan
-            chosen_popt: tuple = ()
+                num_peaks = 0
+                n_iter = 0
+                while (num_peaks == 0) and (len(x) >= min_points):
+                    if n_iter > 0:
+                        x = x[1:]
+                        y = y[1:]
+                        y_s = y_s[1:]
+                    n_iter += 1
+                    if len(x) < min_points:
+                        break
+                    max_intensity = y_s.max()
+                    if max_intensity <= 0:
+                        break
+                    peaks_indices, _ = find_peaks(y_s, prominence=max_intensity * prominence_frac)
+                    num_peaks = len(peaks_indices)
 
-            # ── Baseline subtraction (optional) ──
+                if num_peaks == 0:
+                    # Fallback: treat the point nearest rtmed as the apex
+                    x = rt_full[mask]
+                    y = intensity_full[mask]
+                    y_s = _smooth_trace(y, savgol_window, savgol_poly)
+                    cut = int(np.argmin(np.abs(rtmed - x)))
+                    x = x[cut:]; y = y[cut:]; y_s = y_s[cut:]
+                    peaks_indices = np.array([0])
+                    num_peaks = 1
+
+            # ── Baseline subtraction ──
             if subtract_baseline:
-                baseline = _estimate_baseline(x, y_s)
-                y_bc = y_s - baseline
-                y_bc = np.clip(y_bc, 0, None)
+                if baseline_scope == "global":
+                    baseline_full = _estimate_baseline(rt_full, trace_smoothed)
+                    baseline = np.interp(x, rt_full, baseline_full)
+                    baseline = np.minimum(baseline, y_s)
+                    baseline = np.clip(baseline, 0, None)
+                else:
+                    baseline = _estimate_baseline(x, y_s)
+                y_bc = np.clip(y_s - baseline, 0, None)
             else:
                 baseline = np.zeros_like(y_s)
                 y_bc = y_s
 
-            # Single peak
-            if num_peaks == 1:
-                apex_rt = x[peaks_indices[0]]
-                apex_int = y_bc[peaks_indices[0]]
-                sig_est = _estimate_sigma(x, y_bc, peaks_indices[0])
+            # Store everything needed for Pass 2
+            # atleast_1d guards against 0-d peaks_indices from edge cases
+            per_sample_peaks[sample_name] = [
+                num_peaks,
+                np.atleast_1d(peaks_indices).astype(int),
+                x, y, y_s, y_bc, baseline,
+            ]
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  Consensus — decide compound-wide peak count from all samples
+        # ══════════════════════════════════════════════════════════════════════
+
+        detected_counts = [
+            data[0] for data in per_sample_peaks.values() if data
+        ]
+
+        consensus_n = 1
+        if detected_counts:
+            if propagate_consensus_splits:
+                # If ≥15 % of samples detect N > 1 peaks, treat ALL samples as having
+                # N peaks. This propagates the split from clearly-resolved samples to
+                # those where the valley between peaks is too shallow to trigger
+                # find_peaks independently.
+                max_n = max(detected_counts)
+                frac_max = sum(1 for c in detected_counts if c == max_n) / len(detected_counts)
+                if max_n >= 2 and frac_max >= 0.15:
+                    consensus_n = max_n
+                else:
+                    from collections import Counter
+                    consensus_n = Counter(detected_counts).most_common(1)[0][0]
+            else:
+                consensus_n = 1
+
+        if consensus_n == 1:
+            consensus_labels = [""]
+        else:
+            consensus_labels = [f"_{i + 1}" for i in range(consensus_n)]
+
+        # Collect apex RTs from samples that match the consensus count so we
+        # can estimate the median valley position used to force-split others.
+        ref_apex_rts: list[list[float]] = [[] for _ in range(consensus_n)]
+        for data in per_sample_peaks.values():
+            if not data:
+                continue
+            n_det, pk_idx, x_s = data[0], data[1], data[2]
+            if n_det != consensus_n:
+                continue
+            sorted_pi = sorted(int(i) for i in pk_idx)
+            for j, pi in enumerate(sorted_pi[:consensus_n]):
+                ref_apex_rts[j].append(float(x_s[pi]))
+
+        median_apex_rts: list[float | None] = [
+            float(np.median(rts)) if rts else None for rts in ref_apex_rts
+        ]
+        # One valley RT between each consecutive pair of expected apices
+        median_valley_rts: list[float | None] = [
+            (median_apex_rts[j] + median_apex_rts[j + 1]) / 2  # type: ignore[operator]
+            if (median_apex_rts[j] is not None and median_apex_rts[j + 1] is not None)
+            else None
+            for j in range(len(median_apex_rts) - 1)
+        ]
+
+        print(
+            f"  consensus_n={consensus_n}  "
+            f"median_apices={[f'{r:.1f}' if r is not None else 'N/A' for r in median_apex_rts]}"
+        )
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  Pass 2 — fit every sample using the consensus layout
+        # ══════════════════════════════════════════════════════════════════════
+
+        final_per_sample: dict[str, list[tuple]] = {}
+
+        for sample_name, data in per_sample_peaks.items():
+
+            # No EIC found for this sample
+            if not data:
+                final_per_sample[sample_name] = [("", np.nan, (), np.array([]))]
+                continue
+
+            num_peaks, peaks_indices, x, y, y_s, y_bc, baseline = data
+            peaks_indices = np.atleast_1d(peaks_indices).astype(int)
+
+            # ── Single-peak compound ──────────────────────────────────────────
+            if consensus_n == 1:
+                pi = peaks_indices[0]
+                sig_est = _estimate_sigma(x, y_bc, pi)
+                popt: tuple = ()
+                area = np.nan
                 try:
-                    chosen_popt, area_main = _fit_single_peak(
-                        x, y_bc, apex_rt, apex_int, fit_model,
-                        sigma_est=sig_est,
+                    popt, area = _fit_single_peak(
+                        x, y_bc, x[pi], y_bc[pi], fit_model, sigma_est=sig_est,
                     )
                 except Exception:
                     pass
+                final_per_sample[sample_name] = [("", area, popt, x.copy())]
+                if output_pdf is not None or return_fit_results:
+                    fit_results.append(FitResult(
+                        compound=cmpd, eic_name=cmpd, sample=sample_name,
+                        x=x.copy(), y_raw=y.copy(), y_smoothed=y_s.copy(),
+                        baseline=baseline.copy(), fit_type="single",
+                        model_name=fit_model, chosen_popt=popt,
+                        area=area, rtmed=rtmed, x_fit=x.copy(),
+                    ))
 
-            # Two+ peaks → double model, pick closest to expected RT
-            elif num_peaks >= 2:
-                top2 = sorted(peaks_indices, key=lambda i: y_bc[i], reverse=True)[:2]
-                rt1, rt2 = x[top2[0]], x[top2[1]]
-                int1, int2 = y_bc[top2[0]], y_bc[top2[1]]
-                sig1 = _estimate_sigma(x, y_bc, top2[0])
-                sig2 = _estimate_sigma(x, y_bc, top2[1])
-                try:
-                    chosen_popt, area_main = _fit_double_peak(
-                        x, y_bc, rt1, int1, rt2, int2,
-                        rtmin, rtmax, rtmed, fit_model,
-                        sigma_est1=sig1, sigma_est2=sig2,
+            # ── Multi-peak compound ───────────────────────────────────────────
+            else:
+                # Determine apex indices for this sample under the consensus layout.
+
+                if num_peaks >= consensus_n:
+                    # Greedy match: assign each reference apex its nearest detected peak.
+                    remaining: list[int] = sorted(int(i) for i in peaks_indices)
+                    assigned: list[int] = []
+                    for ref_rt in [r for r in median_apex_rts if r is not None]:
+                        if not remaining:
+                            break
+                        best = int(min(remaining, key=lambda i: abs(x[i] - ref_rt)))
+                        assigned.append(best)
+                        remaining.remove(best)
+                    sorted_pkidxs: list[int] = sorted(assigned)
+
+                else:
+                    # Fewer peaks detected — use median valley RTs to force-split
+                    # the window into consensus_n regions, then find the local apex
+                    # (argmax of y_bc) within each region.
+                    split_pts = [0]
+                    for vrt in median_valley_rts:
+                        vidx = int(np.argmin(np.abs(x - vrt))) if vrt is not None else len(x) // 2
+                        split_pts.append(vidx)
+                    split_pts.append(len(x))
+
+                    sorted_pkidxs = []
+                    for k in range(len(split_pts) - 1):
+                        seg = y_bc[split_pts[k] : split_pts[k + 1]]
+                        if len(seg) > 0:
+                            sorted_pkidxs.append(split_pts[k] + int(np.argmax(seg)))
+                        elif median_apex_rts[k] is not None:
+                            sorted_pkidxs.append(int(np.argmin(np.abs(x - median_apex_rts[k]))))
+
+                # Fit each sub-peak in its valley-bounded sub-window
+                sample_entries: list[tuple] = []
+                for pk_idx, label in zip(sorted_pkidxs, consensus_labels):
+                    left_i, right_i = _find_peak_subwindow(
+                        y_bc, int(pk_idx), [int(i) for i in sorted_pkidxs]
                     )
-                except Exception:
-                    pass
+                    x_sub = x[left_i : right_i + 1]
+                    y_sub = y_bc[left_i : right_i + 1]
+                    local_idx = int(pk_idx) - left_i
+                    sig_est = _estimate_sigma(x_sub, y_sub, local_idx)
 
-            cmpd_results[sample_name] = area_main
+                    popt = ()
+                    area = np.nan
+                    try:
+                        popt, area = _fit_single_peak(
+                            x_sub, y_sub, x[pk_idx], y_bc[pk_idx],
+                            fit_model, sigma_est=sig_est,
+                        )
+                    except Exception:
+                        pass
 
-            # Store fit result for PDF plotting
-            if output_pdf is not None:
-                fit_results.append(FitResult(
-                    compound=cmpd,
-                    sample=sample_name,
-                    x=x.copy(),
-                    y_raw=y.copy() if 'y' in dir() else y_s.copy(),
-                    y_smoothed=y_s.copy(),
-                    baseline=baseline.copy(),
-                    fit_type="single" if num_peaks == 1 else "double",
-                    model_name=fit_model,
-                    chosen_popt=chosen_popt,
-                    area=area_main,
-                    rtmed=rtmed,
-                ))
+                    sample_entries.append((label, area, popt, x_sub.copy()))
 
-        all_results[cmpd] = cmpd_results
+                    if output_pdf is not None or return_fit_results:
+                        fit_results.append(FitResult(
+                            compound=cmpd + label,
+                            eic_name=cmpd,
+                            sample=sample_name,
+                            x=x.copy(),
+                            y_raw=y.copy(),
+                            y_smoothed=y_s.copy(),
+                            baseline=baseline.copy(),
+                            fit_type="multi",
+                            model_name=fit_model,
+                            chosen_popt=popt,
+                            area=area,
+                            rtmed=rtmed,
+                            x_fit=x_sub.copy(),
+                        ))
+
+                final_per_sample[sample_name] = sample_entries
+
+        # ── Aggregate into all_results ────────────────────────────────────────
+        all_labels_used: set[str] = set()
+        for entries in final_per_sample.values():
+            for label, *_ in entries:
+                all_labels_used.add(label)
+
+        for label in all_labels_used:
+            key = cmpd + label
+            all_results.setdefault(key, {})
+            for sample_name, entries in final_per_sample.items():
+                match = [a for (lbl, a, *_) in entries if lbl == label]
+                all_results[key][sample_name] = match[0] if match else np.nan
 
     results_df = pd.DataFrame(all_results)
     results_df.index.name = "Sample"
@@ -617,6 +1001,8 @@ def integrate_experiment(
     if output_pdf and fit_results:
         _export_fit_pdf(fit_results, output_pdf)
 
+    if return_fit_results:
+        return results_df, fit_results
     return results_df
 
 
@@ -652,6 +1038,11 @@ def main() -> None:
         "--no-baseline", action="store_true",
         help="Disable baseline subtraction before fitting",
     )
+    parser.add_argument(
+        "--baseline-scope", default="narrow",
+        choices=VALID_BASELINE_SCOPES,
+        help="Baseline window: narrow uses the compound RT window; global uses the full trace",
+    )
     args = parser.parse_args()
 
     integrate_experiment(
@@ -660,6 +1051,7 @@ def main() -> None:
         output_pdf=args.pdf,
         fit_model=args.model,
         subtract_baseline=not args.no_baseline,
+        baseline_scope=args.baseline_scope,
     )
 
 

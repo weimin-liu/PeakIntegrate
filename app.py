@@ -9,6 +9,8 @@ import sys
 import os
 import pickle
 import copy
+import io
+import zipfile
 
 import streamlit as st
 import numpy as np
@@ -28,10 +30,12 @@ from PeakIntegrate.src.models import (
 )
 from PeakIntegrate.src.loader import load_experiment
 from PeakIntegrate.src.integration import (
+    build_sample_overlay_figures,
     integrate_experiment,
     gauss,
     double_gauss,
     TARGET_COMPOUNDS,
+    VALID_BASELINE_SCOPES,
     VALID_MODELS,
 )
 
@@ -115,6 +119,8 @@ def _init_state():
         "exp_corrected": None,
         "exp_clustered": None,
         "results_df": None,
+        "results_figures": {},
+        "result_column_aliases": {},
         "manual_anchors": {},
         "cluster_config": {"brGDGT_IIIa": 3, "brGDGT_IIa": 2},
     }
@@ -131,6 +137,24 @@ def _active_exp():
         if st.session_state[key] is not None:
             return st.session_state[key]
     return None
+
+
+def _display_result_name(column_name: str) -> str:
+    """Return the preferred display name for a result column."""
+    aliases = st.session_state.get("result_column_aliases", {})
+    alias = aliases.get(column_name)
+    if isinstance(alias, str) and alias.strip():
+        return f"{alias.strip()} ({column_name})"
+    return column_name
+
+
+def _result_alias_frame(columns: list[str]) -> pd.DataFrame:
+    """Build the editable result-name mapping table."""
+    aliases = st.session_state.get("result_column_aliases", {})
+    return pd.DataFrame({
+        "original_name": columns,
+        "display_name": [aliases.get(col, "") for col in columns],
+    })
 
 
 # ════════════════════════════════════════════
@@ -155,7 +179,7 @@ with st.sidebar:
         help="Path to the raw EIC data file",
     )
 
-    if st.button("🚀 Load Data", use_container_width=True, type="primary"):
+    if st.button("🚀 Load Data", width="stretch", type="primary"):
         with st.spinner("Loading experiment..."):
             try:
                 exp = load_experiment(
@@ -166,6 +190,8 @@ with st.sidebar:
                 st.session_state["exp_corrected"] = None
                 st.session_state["exp_clustered"] = None
                 st.session_state["results_df"] = None
+                st.session_state["results_figures"] = {}
+                st.session_state["result_column_aliases"] = {}
                 st.success(f"Loaded {len(exp.chromatograms)} samples")
             except Exception as e:
                 st.error(f"Failed to load: {e}")
@@ -178,7 +204,7 @@ with st.sidebar:
         "Experiment pickle path",
         value="/Users/weimin/10-Project/GDGT_peak_integration/experiment.pkl",
     )
-    if st.button("📥 Load Pickle", use_container_width=True):
+    if st.button("📥 Load Pickle", width="stretch"):
         try:
             with open(pkl_path, "rb") as f:
                 exp = pickle.load(f)
@@ -186,6 +212,8 @@ with st.sidebar:
             st.session_state["exp_corrected"] = None
             st.session_state["exp_clustered"] = None
             st.session_state["results_df"] = None
+            st.session_state["results_figures"] = {}
+            st.session_state["result_column_aliases"] = {}
             st.success(f"Loaded {len(exp.chromatograms)} samples from pickle")
         except Exception as e:
             st.error(f"Failed: {e}")
@@ -296,7 +324,7 @@ with tab1:
 
         st.divider()
 
-        if st.button("▶️  Run RT Correction", use_container_width=True, type="primary"):
+        if st.button("▶️  Run RT Correction", width="stretch", type="primary"):
             with st.spinner("Correcting retention times..."):
                 try:
                     exp_c = exp.rt_shift(
@@ -312,6 +340,8 @@ with tab1:
                     st.session_state["exp_corrected"] = exp_c
                     st.session_state["exp_clustered"] = None
                     st.session_state["results_df"] = None
+                    st.session_state["results_figures"] = {}
+                    st.session_state["result_column_aliases"] = {}
                     st.markdown("""
                     <div class="success-banner">
                         ✅ <strong>RT correction complete!</strong> Switch to the Visualization tab to inspect results.
@@ -556,7 +586,7 @@ with tab3:
         btn_col1, btn_col2 = st.columns(2)
 
         with btn_col1:
-            if st.button("▶️  Run Clustering", use_container_width=True, type="primary"):
+            if st.button("▶️  Run Clustering", width="stretch", type="primary"):
                 if not config:
                     st.warning("Add at least one compound to cluster.")
                 else:
@@ -566,6 +596,8 @@ with tab3:
                             exp_clust = exp_clust.point_cluster_batch(dict(config))
                             st.session_state["exp_clustered"] = exp_clust
                             st.session_state["results_df"] = None
+                            st.session_state["results_figures"] = {}
+                            st.session_state["result_column_aliases"] = {}
 
                             st.markdown("""
                             <div class="success-banner">
@@ -577,7 +609,7 @@ with tab3:
                             st.error(f"Clustering failed: {e}")
 
         with btn_col2:
-            if st.button("🤖 Auto-Cluster All Compounds", use_container_width=True):
+            if st.button("🤖 Auto-Cluster All Compounds", width="stretch"):
                 with st.spinner("Auto-detecting clusters for all compounds..."):
                     try:
                         # Collect all unique EIC compound names
@@ -593,6 +625,8 @@ with tab3:
                         exp_clust = exp_clust.point_cluster_batch(auto_config)
                         st.session_state["exp_clustered"] = exp_clust
                         st.session_state["results_df"] = None
+                        st.session_state["results_figures"] = {}
+                        st.session_state["result_column_aliases"] = {}
 
                         st.markdown("""
                         <div class="success-banner">
@@ -712,10 +746,31 @@ with tab4:
                 for eic in chrom.eics
                 for p in eic.picked
             })
+
+            default_selection = [
+                c for c in TARGET_COMPOUNDS if c in available_peak_names
+            ]
+
+            if "int_cmpd_multiselect" not in st.session_state:
+                st.session_state["int_cmpd_multiselect"] = default_selection
+            else:
+                st.session_state["int_cmpd_multiselect"] = [
+                    c for c in st.session_state["int_cmpd_multiselect"]
+                    if c in available_peak_names
+                ]
+
+            sel_col, clr_col = st.columns([1, 1])
+            with sel_col:
+                if st.button("✅ Select All", width="stretch"):
+                    st.session_state["int_cmpd_multiselect"] = available_peak_names
+            with clr_col:
+                if st.button("❌ Clear", width="stretch"):
+                    st.session_state["int_cmpd_multiselect"] = []
+
             target_cmpds = st.multiselect(
                 "Compounds to integrate",
                 options=available_peak_names,
-                default=[c for c in TARGET_COMPOUNDS if c in available_peak_names],
+                key="int_cmpd_multiselect",
             )
 
         with col2:
@@ -732,51 +787,46 @@ with tab4:
             savgol_poly = st.number_input("Savgol poly order", value=3, min_value=1, max_value=7)
             prominence_frac = st.slider("Prominence threshold", 0.01, 0.20, 0.05, 0.01)
             subtract_bl = st.toggle("📉 Subtract baseline", value=True)
-            generate_pdf = st.toggle("📄 Generate peak overlay PDF", value=False)
+            propagate_splits = st.toggle(
+                "↔️ Propagate split peaks across samples",
+                value=True,
+                help="If enabled, compounds detected as multi-peak in some samples can be forced to the same split layout in other samples.",
+            )
+            baseline_scope = st.selectbox(
+                "Baseline estimation window",
+                options=list(VALID_BASELINE_SCOPES),
+                format_func=lambda s: "Narrow RT window" if s == "narrow" else "Global RT window",
+                index=0,
+                disabled=not subtract_bl,
+                help="Use only the compound RT window or estimate the baseline from the full chromatogram trace.",
+            )
 
         st.divider()
 
-        if st.button("▶️  Run Integration", use_container_width=True, type="primary"):
+        if st.button("▶️  Run Integration", width="stretch", type="primary"):
             if not target_cmpds:
                 st.warning("Select at least one compound.")
             else:
                 with st.spinner(f"Fitting {model_labels[selected_model]} models and integrating peaks..."):
                     try:
-                        # Save experiment to a temp pickle so integrate_experiment can load it
-                        import tempfile
-                        tmp = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
-                        pickle.dump(exp_int, tmp, protocol=pickle.HIGHEST_PROTOCOL)
-                        tmp.close()
-
-                        # Prepare PDF output path if requested
-                        pdf_tmp = None
-                        if generate_pdf:
-                            pdf_tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-                            pdf_tmp.close()
-
-                        df = integrate_experiment(
-                            pkl_path=tmp.name,
+                        df, fit_results = integrate_experiment(
+                            experiment=exp_int,          # pass object directly — no pickle round-trip
                             output_csv=None,
-                            output_pdf=pdf_tmp.name if pdf_tmp else None,
+                            output_pdf=None,
                             target_cmpds=target_cmpds,
                             fit_model=selected_model,
                             subtract_baseline=subtract_bl,
+                            baseline_scope=baseline_scope,
                             min_points=min_points,
                             savgol_window=savgol_window,
                             savgol_poly=savgol_poly,
                             prominence_frac=prominence_frac,
+                            propagate_consensus_splits=propagate_splits,
+                            return_fit_results=True,
                         )
-                        os.unlink(tmp.name)
-
-                        # Read PDF bytes into session state for download
-                        if pdf_tmp and os.path.exists(pdf_tmp.name):
-                            with open(pdf_tmp.name, "rb") as pf:
-                                st.session_state["results_pdf"] = pf.read()
-                            os.unlink(pdf_tmp.name)
-                        else:
-                            st.session_state["results_pdf"] = None
 
                         st.session_state["results_df"] = df
+                        st.session_state["results_figures"] = build_sample_overlay_figures(fit_results)
 
                         st.markdown("""
                         <div class="success-banner">
@@ -790,6 +840,7 @@ with tab4:
         results_df = st.session_state.get("results_df")
         if results_df is not None:
             st.markdown("#### Results Preview")
+            display_df = results_df.rename(columns=_display_result_name)
 
             # Metrics row
             mcols = st.columns(4)
@@ -812,56 +863,110 @@ with tab4:
                 <div class="metric-card"><h3>{nan_count}</h3><p>NaN values</p></div>
                 """, unsafe_allow_html=True)
 
+            st.markdown("#### Column Labels")
+            alias_df = _result_alias_frame(list(results_df.columns))
+            edited_alias_df = st.data_editor(
+                alias_df,
+                width="stretch",
+                height=min(360, 36 + 35 * len(alias_df)),
+                hide_index=True,
+                disabled=["original_name"],
+                column_config={
+                    "original_name": st.column_config.TextColumn("Original name"),
+                    "display_name": st.column_config.TextColumn("Display name"),
+                },
+                key="result_alias_editor",
+            )
+            st.session_state["result_column_aliases"] = {
+                row["original_name"]: row["display_name"].strip()
+                for row in edited_alias_df.to_dict("records")
+                if isinstance(row["display_name"], str) and row["display_name"].strip()
+            }
+            display_df = results_df.rename(columns=_display_result_name)
+
             st.dataframe(
-                results_df.style.format("{:.2e}", na_rep="NaN"),
-                use_container_width=True,
+                display_df.style.format("{:.2e}", na_rep="NaN"),
+                width="stretch",
                 height=400,
             )
+
+            results_figures = st.session_state.get("results_figures", {})
+            if results_figures:
+                st.markdown("#### Interactive Sample View")
+                sample_names = list(results_figures.keys())
+                selected_sample = st.selectbox(
+                    "Sample to inspect",
+                    options=sample_names,
+                    key="integration_sample_view",
+                )
+                sample_fig = results_figures[selected_sample]
+                st.plotly_chart(sample_fig, use_container_width=True)
 
             # ── Export buttons ──
             st.markdown("#### Export")
             ecol1, ecol2, ecol3, ecol4 = st.columns(4)
 
             with ecol1:
-                csv_data = results_df.to_csv()
+                csv_data = display_df.to_csv()
                 st.download_button(
                     "📥 Download CSV",
                     data=csv_data,
                     file_name="peak_integration_results.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             with ecol2:
-                pdf_bytes = st.session_state.get("results_pdf")
-                if pdf_bytes:
+                if results_figures:
+                    selected_sample = st.session_state.get("integration_sample_view")
+                    sample_fig = results_figures.get(selected_sample) if selected_sample else None
+                    html_data = (
+                        sample_fig.to_html(full_html=True, include_plotlyjs="cdn")
+                        if sample_fig is not None else None
+                    )
                     st.download_button(
-                        "📄 Download PDF",
-                        data=pdf_bytes,
-                        file_name="gaussian_overlays.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
+                        "🌐 Download Sample HTML",
+                        data=html_data,
+                        file_name=f"{selected_sample}_integration.html",
+                        mime="text/html",
+                        width="stretch",
                     )
                 else:
                     st.button(
-                        "📄 No PDF generated",
+                        "🌐 No HTML figure",
                         disabled=True,
-                        use_container_width=True,
-                        help="Enable 'Generate Gaussian overlay PDF' and re-run integration.",
+                        width="stretch",
+                        help="Run integration to generate interactive sample figures.",
                     )
 
             with ecol3:
-                save_path = st.text_input(
-                    "Save CSV to path",
-                    value="results.csv",
-                    key="csv_save_path",
-                )
-                if st.button("💾 Save CSV to Disk", use_container_width=True):
-                    try:
-                        results_df.to_csv(save_path)
-                        st.success(f"Saved to {save_path}")
-                    except Exception as e:
-                        st.error(f"Failed: {e}")
+                if results_figures:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for sample_name, fig in results_figures.items():
+                            safe_name = "".join(
+                                ch if ch.isalnum() or ch in ("-", "_") else "_"
+                                for ch in sample_name
+                            )
+                            zf.writestr(
+                                f"{safe_name}_integration.html",
+                                fig.to_html(full_html=True, include_plotlyjs="cdn"),
+                            )
+                    zip_buffer.seek(0)
+                    st.download_button(
+                        "🗂️ Download All HTMLs",
+                        data=zip_buffer.getvalue(),
+                        file_name="all_sample_integrations.zip",
+                        mime="application/zip",
+                        width="stretch",
+                    )
+                else:
+                    st.button(
+                        "🗂️ No HTML figures",
+                        disabled=True,
+                        width="stretch",
+                        help="Run integration to generate interactive sample figures.",
+                    )
 
             with ecol4:
                 pkl_save_path = st.text_input(
@@ -869,7 +974,7 @@ with tab4:
                     value="experiment.pkl",
                     key="pkl_save_path",
                 )
-                if st.button("💾 Save Experiment (.pkl)", use_container_width=True):
+                if st.button("💾 Save Experiment (.pkl)", width="stretch"):
                     try:
                         with open(pkl_save_path, "wb") as f:
                             pickle.dump(exp_int, f, protocol=pickle.HIGHEST_PROTOCOL)

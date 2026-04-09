@@ -38,14 +38,14 @@ if (is.null(SCRIPT_DIR) || length(SCRIPT_DIR) == 0 || SCRIPT_DIR == "") {
   SCRIPT_DIR <- "."
 }
 #PROJECT_ROOT <- normalizePath(file.path(SCRIPT_DIR, ".."), mustWork = FALSE)
-PROJECT_ROOT <- "/Users/weimin/Downloads/KapK"
+PROJECT_ROOT <- "/Users/weimin/Project/AngkorWat/data/APCI/1st"
 
 # --- Paths ---
 MZML_DIR <- file.path(PROJECT_ROOT, "mzml") # Input mzML folder
-CMPDS_YAML <- "/Users/weimin/Project/PeakIntegrate/config/cmpds.yaml"
+CMPDS_YAML <- "/Users/weimin/Project/cmpds.yaml"
 HDF5_OUT <- file.path(PROJECT_ROOT, "chrom_data.h5")
 CSV_OUT_DIR <- file.path(PROJECT_ROOT, "tables") # per-compound CSVs
-RDS_OUT <- file.path(PROJECT_ROOT, "KapK.rds")
+RDS_OUT <- file.path(PROJECT_ROOT, "Angkorwat.rds")
 
 # --- Parallelism ---
 N_CORES <- 4L
@@ -82,8 +82,8 @@ ALIGN_MIN_FRAC <- 0.8
 ALIGN_SPAN <- 0.2
 
 # --- EIC Extraction Tolerances ---
-MZ_TOL <- 0.01 # m/z window (± Da)
-RT_TOL <- 4 * 60 # RT window (± seconds)
+MZ_TOL <- 0.005 # m/z window (± Da)
+RT_TOL <- 8 * 60 # RT window (± seconds)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

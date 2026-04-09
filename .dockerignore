@@ -3,9 +3,13 @@
 .gitignore
 .vscode
 .idea
+
+# Python environments and caches
+.venv
 __pycache__
 *.pyc
 *.pyo
+*.pyd
 
 # Data files (mount via volumes instead)
 *.h5

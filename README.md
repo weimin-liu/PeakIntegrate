@@ -133,24 +133,42 @@ The Shiny app provides a 5-step GUI:
 
 ## Docker
 
-Share the Python pipeline + GUI as a lightweight container (~200 MB).  
-R preprocessing runs locally (requires XCMS + interactive display).
+The container now includes both runtimes:
+- Python + Streamlit for the integration web app
+- R + Shiny for the preprocessing UI
+- `preprocessing/analysis.R` for the CLI preprocessing pipeline
 
 ```bash
 # Build
 cd PeakIntegrate
 docker build -t peakintegrate .
 
-# Launch GUI (http://localhost:8501)
-# Mount the directory containing chrom_data.h5, CSVs, experiment.pkl
-docker run -p 8501:8501 -v /path/to/data:/data peakintegrate
+# Python web app on http://localhost:8501
+docker run --rm -p 8501:8501 -v /path/to/data:/data peakintegrate
 
-# Or use Docker Compose
-docker compose up
+# R Shiny preprocessing app on http://localhost:3838
+docker run --rm -p 3838:3838 -v /path/to/data:/data \
+  -e APP_MODE=shiny peakintegrate
+
+# Run the analysis script inside the same image
+docker run --rm -v /path/to/data:/data -e APP_MODE=analysis \
+  peakintegrate --mzml_dir /data/mzml
 ```
 
-> **Workflow:** Run `analysis.R` locally first (produces HDF5 + CSVs), then
-> use Docker for everything else.
+With Docker Compose:
+
+```bash
+# Start both web UIs
+docker compose up streamlit shiny
+
+# Run the analysis script as a one-off container
+docker compose run --rm analysis --mzml_dir /data/mzml
+```
+
+By default the container expects input/output data under `/data`, and it uses
+`/app/PeakIntegrate/config/cmpds.yaml` as the shared compound config. The
+analysis script also now accepts `--project_root`, `--mzml_dir`, `--cmpds_yaml`,
+`--hdf5_out`, `--csv_out_dir`, `--rds_out`, and `--n_cores` overrides.
 
 ## License
 

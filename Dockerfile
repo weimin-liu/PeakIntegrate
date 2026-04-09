@@ -1,42 +1,52 @@
+# syntax=docker/dockerfile:1.7
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  PeakIntegrate — Python-only Docker Image
+#  PeakIntegrate — Combined R + Python image
 #
-#  The R preprocessing step (analysis.R) runs locally on your machine
-#  (requires XCMS + interactive display). This container handles only
-#  the Python pipeline: data loading → RT correction → clustering →
-#  Gaussian integration, plus the Streamlit GUI.
+#  Includes:
+#    • `preprocessing/analysis.R` for the XCMS preprocessing pipeline
+#    • `preprocessing/app.R` as a Shiny frontend for preprocessing
+#    • `app.py` as the Streamlit frontend for the Python integration workflow
 #
-#  Build:   docker build -t peakintegrate .
-#  Run GUI: docker run -p 8501:8501 -v ./data:/data peakintegrate
+#  Runtime selection is handled with `APP_MODE`:
+#    • `streamlit` (default) → Python web app on port 8501
+#    • `shiny`               → R Shiny preprocessing app on port 3838
+#    • `analysis`            → run `analysis.R`
 # ══════════════════════════════════════════════════════════════════════════════
 
-FROM python:3.11-slim
+FROM bioconductor/bioconductor_docker:RELEASE_3_21
 
-# System libraries for HDF5
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+ENV PEAKINTEGRATE_CONFIG=/app/PeakIntegrate/config/cmpds.yaml
+ENV PEAKINTEGRATE_DATA_ROOT=/data
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
     libhdf5-dev \
     pkg-config \
-    gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+RUN python3 -m pip install --break-system-packages -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
 
-# Copy the package
+RUN R -q -e "install.packages(c('shiny', 'plotly', 'yaml', 'RColorBrewer'), repos='https://cloud.r-project.org/')" \
+    && R -q -e "BiocManager::install(c('xcms', 'MsExperiment', 'BiocParallel', 'rhdf5'), ask=FALSE, update=FALSE)"
+
 WORKDIR /app
 COPY . /app/PeakIntegrate/
+COPY docker-entrypoint.sh /usr/local/bin/peakintegrate-entrypoint
 
-# PeakIntegrate importable
+RUN chmod +x /usr/local/bin/peakintegrate-entrypoint
+
 ENV PYTHONPATH="/app:${PYTHONPATH}"
 
-# Streamlit config
-ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+EXPOSE 8501 3838
 
-EXPOSE 8501
-
-# Default: launch the Streamlit GUI
-CMD ["streamlit", "run", "PeakIntegrate/app.py", \
-    "--server.port=8501", \
-    "--server.address=0.0.0.0", \
-    "--server.headless=true"]
+ENTRYPOINT ["peakintegrate-entrypoint"]
+CMD []
