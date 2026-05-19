@@ -24,13 +24,44 @@ class CompoundDef:
     """Definition of a single compound from cmpds.yaml.
 
     Attributes:
-        name:  Compound name as it appears in the YAML key.
-        mz:    Target m/z value.
-        rt:    Expected retention time in minutes (may be ``None``).
+        name:        Compound name as it appears in the YAML key.
+        mz:          Target m/z value.
+        rt:          Expected retention time center in minutes (may be ``None``).
+        rtmin:       Optional left RT boundary in minutes.
+        rtmax:       Optional right RT boundary in minutes.
+        source_eic:  Optional source EIC name for app-side mapping.
     """
     name: str
     mz: float
     rt: Optional[float]
+    rtmin: Optional[float] = None
+    rtmax: Optional[float] = None
+    source_eic: Optional[str] = None
+
+
+def _parse_rt_value(rt_value: object) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Parse ``rt`` as either a scalar center or a min/max window in minutes."""
+    if rt_value is None:
+        return None, None, None
+
+    if isinstance(rt_value, (int, float)):
+        return float(rt_value), None, None
+
+    if isinstance(rt_value, dict):
+        rtmin_raw = rt_value.get("min")
+        rtmax_raw = rt_value.get("max")
+        center_raw = rt_value.get("center")
+
+        rtmin = float(rtmin_raw) if rtmin_raw is not None else None
+        rtmax = float(rtmax_raw) if rtmax_raw is not None else None
+        center = float(center_raw) if center_raw is not None else None
+
+        if center is None and rtmin is not None and rtmax is not None:
+            center = (rtmin + rtmax) / 2.0
+
+        return center, rtmin, rtmax
+
+    raise TypeError("rt must be a number, a {min,max[,center]} mapping, or null")
 
 
 # ════════════════════════════════════════════
@@ -57,10 +88,14 @@ def load_compounds(yaml_path: str = _DEFAULT_YAML) -> dict[str, CompoundDef]:
 
     compounds: dict[str, CompoundDef] = {}
     for name, props in raw.items():
+        rt, rtmin, rtmax = _parse_rt_value(props.get("rt"))
         compounds[name] = CompoundDef(
             name=name,
             mz=float(props["mz"]),
-            rt=float(props["rt"]) if props.get("rt") is not None else None,
+            rt=rt,
+            rtmin=rtmin,
+            rtmax=rtmax,
+            source_eic=props.get("source_eic") or props.get("eic"),
         )
     return compounds
 

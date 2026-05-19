@@ -5,7 +5,7 @@ Automated GDGT chromatographic peak integration pipeline for branched and isopre
 ## Features
 
 - **Data ingestion** — Loads picked-peak CSVs and raw chromatograms from HDF5 into a structured `Experiment` object
-- **Retention-time correction** — Polynomial RT alignment using calibration compounds with optional manual anchors
+- **Retention-time correction** — Polynomial or LOESS RT alignment using calibration compounds or all shared picked peaks, with optional manual anchors
 - **Peak clustering** — KMeans-based grouping of co-eluting isomers (e.g. brGDGT_IIIa → IIIa_0, IIIa_1, IIIa_2)
 - **Gaussian deconvolution** — Single and double Gaussian fitting with automatic peak selection closest to expected RT
 - **Interactive plotting** — Plotly-based EIC overlays and picked-peak scatter plots

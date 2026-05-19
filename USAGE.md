@@ -58,7 +58,7 @@ print(exp)  # Experiment(samples=50, rt_corrected=False)
 
 ## 3. Retention-Time Correction
 
-RT drift between runs is corrected using a polynomial fit anchored to known calibration peaks.
+RT drift between runs can be corrected either with a polynomial fit anchored to known calibration peaks or with a LOESS smoother built from all shared picked peaks across samples.
 
 ### Basic correction
 
@@ -80,6 +80,18 @@ exp_corrected = exp.rt_shift(
 )
 ```
 
+### LOESS correction from all shared picked peaks
+
+```python
+exp_corrected = exp.rt_shift(
+    method="loess",
+    ref_sample_name="AEGIS-100",
+    loess_frac=0.4,
+)
+# Uses every compound with exactly one picked peak in both the sample
+# and the reference sample as an RT anchor.
+```
+
 ### Manual anchors (for problematic samples)
 
 If automated alignment fails for specific samples, inject manual corrections:
@@ -89,7 +101,8 @@ exp_corrected = exp_corrected.rt_shift(
     manual_anchors={
         "AEGIS-158": [(2512, 2534)],  # (observed_rt, target_rt)
         "AEGIS-200": [(1800, 1815), (2600, 2620)],
-    }
+    },
+    method="loess",
 )
 ```
 
@@ -104,6 +117,8 @@ exp_corrected = exp_corrected.rt_shift(
 | `degree` | int | `2` | Polynomial degree |
 | `ref_sample_name` | str | First sample | Reference sample name |
 | `manual_anchors` | dict | `None` | `{sample: [(obs_rt, target_rt), ...]}` |
+| `method` | str | `'polynomial'` | `'polynomial'` or `'loess'` |
+| `loess_frac` | float | `0.4` | Fraction of anchors used in each local LOESS fit |
 
 ---
 

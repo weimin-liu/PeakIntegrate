@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from sklearn.cluster import KMeans
@@ -44,6 +44,18 @@ class PickedPeak:
     intb: float
     sigma: float
 
+    def clone(self) -> "PickedPeak":
+        """Return a detached copy of this picked peak."""
+        return PickedPeak(
+            name=self.name,
+            rt=float(self.rt),
+            rtmin=float(self.rtmin),
+            rtmax=float(self.rtmax),
+            into=float(self.into),
+            intb=float(self.intb),
+            sigma=float(self.sigma),
+        )
+
 
 @dataclass(slots=True)
 class EIC:
@@ -65,6 +77,17 @@ class EIC:
     picked: list[PickedPeak]
     shifted_rt: Optional[np.ndarray] = None
 
+    def clone(self) -> "EIC":
+        """Return a detached copy of this EIC and its picked peaks."""
+        return EIC(
+            name=self.name,
+            mz=self.mz,
+            rt=np.array(self.rt, copy=True),
+            intensity=np.array(self.intensity, copy=True),
+            picked=[peak.clone() for peak in self.picked],
+            shifted_rt=None if self.shifted_rt is None else np.array(self.shifted_rt, copy=True),
+        )
+
 
 # ════════════════════════════════════════════
 #  Chromatogram
@@ -82,6 +105,10 @@ class Chromatogram:
     def __init__(self, eics: Optional[list[EIC]] = None):
         self.eics: list[EIC] = eics if eics is not None else []
         self._eic_index: dict[str, EIC] = {eic.name: eic for eic in self.eics}
+
+    def clone(self) -> "Chromatogram":
+        """Return a detached copy of this chromatogram."""
+        return Chromatogram([eic.clone() for eic in self.eics])
 
     # ---- EIC access ----
 
@@ -144,20 +171,75 @@ class Chromatogram:
 
     # ---- RT correction ----
 
-    def shift_rt(self, poly: np.poly1d) -> None:
-        """Apply a polynomial RT correction to every EIC and its peaks."""
+    def shift_rt(self, shift_model: Callable[[np.ndarray | float], np.ndarray | float]) -> None:
+        """Apply an RT shift model to every EIC and its peaks."""
         for eic in self.eics:
             if eic.shifted_rt is None:
                 eic.shifted_rt = eic.rt.copy()
 
-            shift_vals = poly(eic.shifted_rt)
+            shift_vals = shift_model(eic.shifted_rt)
             eic.shifted_rt = eic.shifted_rt + shift_vals
 
             for peak in eic.picked:
-                shift = poly(peak.rt)
+                shift = float(shift_model(peak.rt))
                 peak.rt += shift
                 peak.rtmin += shift
                 peak.rtmax += shift
+
+
+class LoessShiftModel:
+    """Lightweight LOESS-style smoother for RT shift as a function of RT."""
+
+    def __init__(self, x: np.ndarray, y: np.ndarray, frac: float = 0.4):
+        if len(x) != len(y):
+            raise ValueError("x and y must have the same length")
+        if len(x) < 3:
+            raise ValueError("LOESS requires at least 3 anchor points")
+
+        order = np.argsort(x)
+        self.x = np.asarray(x, dtype=float)[order]
+        self.y = np.asarray(y, dtype=float)[order]
+        self.frac = float(np.clip(frac, 0.15, 1.0))
+        self.n = len(self.x)
+        self.window = max(3, int(np.ceil(self.frac * self.n)))
+        self.y_smoothed = np.array([self._predict_one(float(x0)) for x0 in self.x])
+
+    def _predict_one(self, x0: float) -> float:
+        distances = np.abs(self.x - x0)
+        kth = min(self.window - 1, self.n - 1)
+        bandwidth = np.partition(distances, kth)[kth]
+        if bandwidth <= 0:
+            exact = distances == 0
+            if np.any(exact):
+                return float(np.mean(self.y[exact]))
+            bandwidth = np.max(distances)
+            if bandwidth <= 0:
+                return float(np.mean(self.y))
+
+        u = distances / bandwidth
+        weights = np.where(u < 1, (1 - u**3) ** 3, 0.0)
+        if np.count_nonzero(weights) < 2:
+            nearest = np.argmin(distances)
+            return float(self.y[nearest])
+
+        x_centered = self.x - x0
+        design = np.column_stack((np.ones_like(self.x), x_centered))
+        weighted_design = design * weights[:, None]
+        xtwx = design.T @ weighted_design
+        xtwy = weighted_design.T @ self.y
+
+        try:
+            beta = np.linalg.solve(xtwx, xtwy)
+        except np.linalg.LinAlgError:
+            beta = np.linalg.pinv(xtwx) @ xtwy
+        return float(beta[0])
+
+    def __call__(self, x_new: np.ndarray | float) -> np.ndarray | float:
+        arr = np.asarray(x_new, dtype=float)
+        preds = np.interp(arr, self.x, self.y_smoothed, left=self.y_smoothed[0], right=self.y_smoothed[-1])
+        if np.isscalar(x_new):
+            return float(preds.item())
+        return preds
 
     # ---- Diagnostics ----
 
@@ -187,7 +269,19 @@ class Experiment:
     def __init__(self, chromatograms: dict[str, Chromatogram]):
         self.chromatograms = chromatograms
         self.rt_corrected: bool = False
-        self.rt_model: Optional[np.poly1d] = None
+        self.rt_model: Optional[dict[str, object]] = None
+        self.rt_diagnostics: dict[str, dict[str, object]] = {}
+
+    def clone(self) -> "Experiment":
+        """Return a detached copy of this experiment."""
+        cloned = Experiment({
+            sample_name: chrom.clone()
+            for sample_name, chrom in self.chromatograms.items()
+        })
+        cloned.rt_corrected = self.rt_corrected
+        cloned.rt_model = copy.deepcopy(self.rt_model)
+        cloned.rt_diagnostics = copy.deepcopy(self.rt_diagnostics)
+        return cloned
 
     # ---- Dict-like helpers ----
 
@@ -222,12 +316,10 @@ class Experiment:
         rtmax_vals: list[float] = []
 
         for chrom in self.chromatograms.values():
-            eics = chrom.get_eic(compound)
-            if not eics:
-                continue
-            eic = eics[0]
-            for peak in eic.picked:
-                if peak.name == compound:
+            for eic in chrom.eics:
+                for peak in eic.picked:
+                    if peak.name != compound:
+                        continue
                     rt_vals.append(peak.rt)
                     rtmin_vals.append(peak.rtmin)
                     rtmax_vals.append(peak.rtmax)
@@ -314,6 +406,120 @@ class Experiment:
 
     # ---- RT Correction ----
 
+    @staticmethod
+    def _collect_unique_peak_map(chrom: Chromatogram) -> dict[str, PickedPeak]:
+        """Return {compound_name: peak} for compounds with exactly one picked peak."""
+        peak_map: dict[str, list[PickedPeak]] = {}
+        for eic in chrom.eics:
+            for peak in eic.picked:
+                peak_map.setdefault(peak.name, []).append(peak)
+        return {
+            name: peaks[0]
+            for name, peaks in peak_map.items()
+            if len(peaks) == 1
+        }
+
+    def _build_polynomial_shift_model(
+        self,
+        sample_name: str,
+        ref_rts: list[float],
+        calibs: list[str],
+        degree: int,
+        manual_anchors: Optional[dict[str, list[tuple[float, float]]]] = None,
+    ) -> Optional[tuple[np.poly1d, dict[str, object]]]:
+        obs_rts: list[float] = []
+        rt_diffs: list[float] = []
+        anchor_labels: list[str] = []
+        chrom = self.chromatograms[sample_name]
+
+        for idx, calib in enumerate(calibs):
+            peaks = chrom.get_peaks(calib)
+            if not peaks:
+                continue
+            obs_rt = peaks[0].rt
+            obs_rts.append(obs_rt)
+            rt_diffs.append(ref_rts[idx] - obs_rt)
+            anchor_labels.append(calib)
+
+        if manual_anchors and sample_name in manual_anchors:
+            for anchor_idx, (observed_rt, target_rt) in enumerate(manual_anchors[sample_name], start=1):
+                obs_rts.append(observed_rt)
+                rt_diffs.append(target_rt - observed_rt)
+                anchor_labels.append(f"manual_{anchor_idx}")
+                print(f"  Manual anchor → {sample_name}: {observed_rt} → {target_rt}")
+
+        if len(obs_rts) < degree + 1:
+            return None
+
+        coef = np.polyfit(obs_rts, rt_diffs, degree)
+        model = np.poly1d(coef)
+        grid_obs = np.linspace(min(obs_rts), max(obs_rts), 200)
+        grid_shift = model(grid_obs)
+        diagnostics = {
+            "method": "polynomial",
+            "sample_name": sample_name,
+            "anchor_labels": anchor_labels,
+            "anchor_obs_rts": np.asarray(obs_rts, dtype=float),
+            "anchor_shift": np.asarray(rt_diffs, dtype=float),
+            "anchor_corrected_rts": np.asarray(obs_rts, dtype=float) + np.asarray(rt_diffs, dtype=float),
+            "grid_obs_rts": grid_obs,
+            "grid_shift": grid_shift,
+            "grid_corrected_rts": grid_obs + grid_shift,
+        }
+        return model, diagnostics
+
+    def _build_loess_shift_model(
+        self,
+        sample_name: str,
+        ref_sample_name: str,
+        calibs: Optional[list[str]] = None,
+        loess_frac: float = 0.4,
+        manual_anchors: Optional[dict[str, list[tuple[float, float]]]] = None,
+    ) -> Optional[tuple[LoessShiftModel, dict[str, object]]]:
+        ref_peak_map = self._collect_unique_peak_map(self.chromatograms[ref_sample_name])
+        sample_peak_map = self._collect_unique_peak_map(self.chromatograms[sample_name])
+
+        allowed = set(calibs) if calibs else None
+        shared_names = sorted(set(ref_peak_map) & set(sample_peak_map))
+        if allowed is not None:
+            shared_names = [name for name in shared_names if name in allowed]
+
+        obs_rts: list[float] = []
+        rt_diffs: list[float] = []
+        anchor_labels: list[str] = []
+        for name in shared_names:
+            ref_peak = ref_peak_map[name]
+            sample_peak = sample_peak_map[name]
+            obs_rts.append(sample_peak.rt)
+            rt_diffs.append(ref_peak.rt - sample_peak.rt)
+            anchor_labels.append(name)
+
+        if manual_anchors and sample_name in manual_anchors:
+            for anchor_idx, (observed_rt, target_rt) in enumerate(manual_anchors[sample_name], start=1):
+                obs_rts.append(observed_rt)
+                rt_diffs.append(target_rt - observed_rt)
+                anchor_labels.append(f"manual_{anchor_idx}")
+                print(f"  Manual anchor → {sample_name}: {observed_rt} → {target_rt}")
+
+        if len(obs_rts) < 3:
+            return None
+
+        model = LoessShiftModel(np.asarray(obs_rts), np.asarray(rt_diffs), frac=loess_frac)
+        grid_obs = np.linspace(min(obs_rts), max(obs_rts), 200)
+        grid_shift = model(grid_obs)
+        diagnostics = {
+            "method": "loess",
+            "sample_name": sample_name,
+            "anchor_labels": anchor_labels,
+            "anchor_obs_rts": np.asarray(obs_rts, dtype=float),
+            "anchor_shift": np.asarray(rt_diffs, dtype=float),
+            "anchor_corrected_rts": np.asarray(obs_rts, dtype=float) + np.asarray(rt_diffs, dtype=float),
+            "grid_obs_rts": grid_obs,
+            "grid_shift": grid_shift,
+            "grid_corrected_rts": grid_obs + grid_shift,
+        }
+        return model, diagnostics
+
     def rt_shift(
         self,
         calibs: Optional[list[str]] = None,
@@ -321,25 +527,38 @@ class Experiment:
         degree: int = 2,
         ref_sample_name: Optional[str] = None,
         manual_anchors: Optional[dict[str, list[tuple[float, float]]]] = None,
+        method: str = "polynomial",
+        loess_frac: float = 0.4,
     ) -> "Experiment":
-        """Create a deep copy of this experiment with polynomial RT correction.
+        """Create a deep copy of this experiment with RT correction.
 
         Parameters:
             calibs:          Calibration compounds. Defaults to
-                             ``['C46-GDGT', 'brGDGT_Ib', 'brGDGT_Ia']``.
+                             ``['C46-GDGT', 'brGDGT_Ib', 'brGDGT_Ia']`` for
+                             polynomial mode, or all shared picked peaks for
+                             LOESS mode when omitted.
             more_calibs:     Additional calibration compounds to append.
-            degree:          Polynomial degree for the correction model.
+            degree:          Polynomial degree for polynomial correction.
             ref_sample_name: Reference sample. Defaults to the first sample.
             manual_anchors:  ``{sample: [(observed_rt, target_rt), ...]}``
+            method:          ``'polynomial'`` or ``'loess'``.
+            loess_frac:      Fraction of anchors used in each local LOESS fit.
 
         Returns:
             A new :class:`Experiment` with corrected RTs.
         """
-        calibs = ["C46-GDGT", "brGDGT_Ib", "brGDGT_Ia"] if calibs is None else list(calibs)
+        method = method.lower()
+        if method not in {"polynomial", "loess"}:
+            raise ValueError("method must be 'polynomial' or 'loess'")
+
+        if calibs is None:
+            calibs = ["C46-GDGT", "brGDGT_Ib", "brGDGT_Ia"] if method == "polynomial" else []
+        else:
+            calibs = list(calibs)
         if more_calibs:
             calibs.extend(more_calibs)
 
-        shifted_exp = copy.deepcopy(self)
+        shifted_exp = self.clone()
 
         ref_sample = (
             list(shifted_exp.chromatograms.keys())[0]
@@ -348,40 +567,47 @@ class Experiment:
         )
 
         ref_rts: list[float] = []
-        for calib in calibs:
-            peaks = shifted_exp.chromatograms[ref_sample].get_peaks(calib)
-            if not peaks:
-                raise ValueError(f"Missing calibration peak '{calib}' in reference sample '{ref_sample}'")
-            ref_rts.append(peaks[0].rt)
-
-        poly = None
-        for sample_name, chrom in shifted_exp.chromatograms.items():
-            obs_rts: list[float] = []
-            rt_diffs: list[float] = []
-
-            for idx, calib in enumerate(calibs):
-                peaks = chrom.get_peaks(calib)
+        if method == "polynomial":
+            for calib in calibs:
+                peaks = shifted_exp.chromatograms[ref_sample].get_peaks(calib)
                 if not peaks:
-                    continue
-                obs_rt = peaks[0].rt
-                obs_rts.append(obs_rt)
-                rt_diffs.append(ref_rts[idx] - obs_rt)
+                    raise ValueError(f"Missing calibration peak '{calib}' in reference sample '{ref_sample}'")
+                ref_rts.append(peaks[0].rt)
 
-            if manual_anchors and sample_name in manual_anchors:
-                for observed_rt, target_rt in manual_anchors[sample_name]:
-                    obs_rts.append(observed_rt)
-                    rt_diffs.append(target_rt - observed_rt)
-                    print(f"  Manual anchor → {sample_name}: {observed_rt} → {target_rt}")
-
-            if len(obs_rts) < degree + 1:
+        rt_models: dict[str, object] = {}
+        rt_diagnostics: dict[str, dict[str, object]] = {}
+        for sample_name, chrom in shifted_exp.chromatograms.items():
+            if sample_name == ref_sample:
                 continue
 
-            coef = np.polyfit(obs_rts, rt_diffs, degree)
-            poly = np.poly1d(coef)
-            chrom.shift_rt(poly)
+            if method == "polynomial":
+                result = shifted_exp._build_polynomial_shift_model(
+                    sample_name=sample_name,
+                    ref_rts=ref_rts,
+                    calibs=calibs,
+                    degree=degree,
+                    manual_anchors=manual_anchors,
+                )
+            else:
+                result = shifted_exp._build_loess_shift_model(
+                    sample_name=sample_name,
+                    ref_sample_name=ref_sample,
+                    calibs=calibs or None,
+                    loess_frac=loess_frac,
+                    manual_anchors=manual_anchors,
+                )
+
+            if result is None:
+                continue
+
+            shift_model, diagnostics = result
+            chrom.shift_rt(shift_model)
+            rt_models[sample_name] = shift_model
+            rt_diagnostics[sample_name] = diagnostics
 
         shifted_exp.rt_corrected = True
-        shifted_exp.rt_model = poly
+        shifted_exp.rt_model = rt_models
+        shifted_exp.rt_diagnostics = rt_diagnostics
         return shifted_exp
 
     # ---- Peak Clustering ----

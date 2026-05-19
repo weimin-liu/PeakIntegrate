@@ -438,6 +438,51 @@ def _smooth_trace(y: np.ndarray, window_length: int, polyorder: int) -> np.ndarr
     return savgol_filter(y, window_length=window_length, polyorder=polyorder)
 
 
+def _fallback_window_area(x: np.ndarray, y: np.ndarray) -> float:
+    """Return a robust numeric area when parametric fitting fails."""
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    if x_arr.size == 0 or y_arr.size == 0 or x_arr.size != y_arr.size:
+        return np.nan
+    finite_mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not np.any(finite_mask):
+        return np.nan
+    x_arr = x_arr[finite_mask]
+    y_arr = np.clip(y_arr[finite_mask], 0, None)
+    if x_arr.size < 2:
+        return float(y_arr[0]) if x_arr.size == 1 else np.nan
+    order = np.argsort(x_arr)
+    return float(np.trapz(y_arr[order], x_arr[order]))
+
+
+def _compound_rt_stats(exp: Experiment, compound: str) -> dict[str, float]:
+    """Compute RT stats directly from picked peaks, independent of Experiment methods."""
+    rt_vals: list[float] = []
+    rtmin_vals: list[float] = []
+    rtmax_vals: list[float] = []
+
+    for chrom in exp.chromatograms.values():
+        for eic in chrom.eics:
+            for peak in eic.picked:
+                if peak.name != compound:
+                    continue
+                if np.isfinite(peak.rt):
+                    rt_vals.append(float(peak.rt))
+                if np.isfinite(peak.rtmin):
+                    rtmin_vals.append(float(peak.rtmin))
+                if np.isfinite(peak.rtmax):
+                    rtmax_vals.append(float(peak.rtmax))
+
+    if not rt_vals or not rtmin_vals or not rtmax_vals:
+        return {"rtmin": np.nan, "rtmax": np.nan, "rtmed": np.nan}
+
+    return {
+        "rtmin": float(np.min(rtmin_vals)),
+        "rtmax": float(np.max(rtmax_vals)),
+        "rtmed": float(np.median(rt_vals)),
+    }
+
+
 # ════════════════════════════════════════════
 #  Fitting Helpers
 # ════════════════════════════════════════════
@@ -694,10 +739,15 @@ def integrate_experiment(
     for cmpd in target_cmpds:
         print(f"Processing {cmpd}...")
 
-        try:
-            rtmin, rtmax, rtmed = exp.get_rt(cmpd).values()
-        except Exception as e:
-            print(f"  Skipping {cmpd}: Could not get RT ({e})")
+        rt_stats = _compound_rt_stats(exp, cmpd)
+        rtmin = rt_stats["rtmin"]
+        rtmax = rt_stats["rtmax"]
+        rtmed = rt_stats["rtmed"]
+        if not (np.isfinite(rtmin) and np.isfinite(rtmax) and np.isfinite(rtmed)):
+            print(f"  Skipping {cmpd}: Could not get finite RT stats")
+            for sample_name in exp.chromatograms.keys():
+                all_results.setdefault(cmpd, {})
+                all_results[cmpd][sample_name] = np.nan
             continue
 
         # ══════════════════════════════════════════════════════════════════════
@@ -710,9 +760,17 @@ def integrate_experiment(
         for sample_name, chrom_obj in exp.chromatograms.items():
 
             matching_eic = next(
-                (eic for eic in chrom_obj.eics if cmpd.startswith(eic.name)),
+                (
+                    eic for eic in chrom_obj.eics
+                    if any(peak.name == cmpd for peak in eic.picked)
+                ),
                 None,
             )
+            if matching_eic is None:
+                matching_eic = next(
+                (eic for eic in chrom_obj.eics if cmpd.startswith(eic.name)),
+                None,
+                )
             if matching_eic is None:
                 per_sample_peaks[sample_name] = []   # sentinel: no EIC
                 continue
@@ -884,7 +942,7 @@ def integrate_experiment(
                 pi = peaks_indices[0]
                 sig_est = _estimate_sigma(x, y_bc, pi)
                 popt: tuple = ()
-                area = np.nan
+                area = _fallback_window_area(x, y_bc)
                 try:
                     popt, area = _fit_single_peak(
                         x, y_bc, x[pi], y_bc[pi], fit_model, sigma_est=sig_est,
@@ -894,7 +952,7 @@ def integrate_experiment(
                 final_per_sample[sample_name] = [("", area, popt, x.copy())]
                 if output_pdf is not None or return_fit_results:
                     fit_results.append(FitResult(
-                        compound=cmpd, eic_name=cmpd, sample=sample_name,
+                        compound=cmpd, eic_name=matching_eic.name, sample=sample_name,
                         x=x.copy(), y_raw=y.copy(), y_smoothed=y_s.copy(),
                         baseline=baseline.copy(), fit_type="single",
                         model_name=fit_model, chosen_popt=popt,
@@ -947,7 +1005,7 @@ def integrate_experiment(
                     sig_est = _estimate_sigma(x_sub, y_sub, local_idx)
 
                     popt = ()
-                    area = np.nan
+                    area = _fallback_window_area(x_sub, y_sub)
                     try:
                         popt, area = _fit_single_peak(
                             x_sub, y_sub, x[pk_idx], y_bc[pk_idx],
@@ -961,7 +1019,7 @@ def integrate_experiment(
                     if output_pdf is not None or return_fit_results:
                         fit_results.append(FitResult(
                             compound=cmpd + label,
-                            eic_name=cmpd,
+                            eic_name=matching_eic.name,
                             sample=sample_name,
                             x=x.copy(),
                             y_raw=y.copy(),
